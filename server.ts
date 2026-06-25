@@ -327,9 +327,41 @@ async function loadTasksFromSheet() {
 }
 
 // API Routes
+// Note: helper functions and `db` are declared hoisted below, but we can call them inside async/sync routes safely.
 
 // Get all tasks
 app.get("/api/tasks", async (req, res) => {
+  const firestoreDb = getFirestoreDb();
+  if (firestoreDb) {
+    try {
+      const collectionRef = firestoreDb.collection("Tasks");
+      const snapshot = await collectionRef.get();
+      if (!snapshot.empty) {
+        const tasks: any[] = [];
+        snapshot.forEach(doc => {
+          const data = doc.data();
+          tasks.push({
+            type: data.type || '',
+            memberId: data.memberId || '',
+            memberName: data.memberName || '',
+            details: data.details || '',
+            additionalInfo: data.additionalInfo || '',
+            status: data.status || 'รอดำเนินการ',
+            score: data.score || 'B',
+            actionLabel: data.actionLabel || 'ดำเนินการ',
+            ...data,
+            refId: doc.id
+          });
+        });
+        inMemoryTasks = tasks;
+        isLoaded = true;
+        return res.json(tasks);
+      }
+    } catch (err) {
+      console.error("Error reading Tasks from Firestore:", err);
+    }
+  }
+
   if (!isLoaded || inMemoryTasks.length === 0) {
     await loadTasksFromSheet();
   }
@@ -339,17 +371,51 @@ app.get("/api/tasks", async (req, res) => {
 // Sync/Reset database with Google Sheets
 app.post("/api/tasks/sync", async (req, res) => {
   await loadTasksFromSheet();
+  
+  // Also sync to Firestore if database is available
+  const firestoreDb = getFirestoreDb();
+  if (firestoreDb) {
+    try {
+      const collectionRef = firestoreDb.collection("Tasks");
+      const writePromises = inMemoryTasks.map(async (task) => {
+        await collectionRef.doc(task.refId).set({
+          ...task,
+          syncedAt: new Date().toISOString()
+        });
+      });
+      await Promise.all(writePromises);
+      console.log(`Synced ${inMemoryTasks.length} tasks to Firestore CRM.`);
+    } catch (err) {
+      console.error("Failed to sync Tasks list to Firestore:", err);
+    }
+  }
+
   res.json({ success: true, message: "ซิงค์ฐานข้อมูลกับ Google Sheets สำเร็จ", tasks: inMemoryTasks });
 });
 
 // Update single task status or details
-app.put("/api/tasks/:refId", (req, res) => {
+app.put("/api/tasks/:refId", async (req, res) => {
   const { refId } = req.params;
   const updates = req.body;
   
   const index = inMemoryTasks.findIndex(t => t.refId === refId);
   if (index !== -1) {
     inMemoryTasks[index] = { ...inMemoryTasks[index], ...updates };
+
+    // Update in Firestore
+    const firestoreDb = getFirestoreDb();
+    if (firestoreDb) {
+      try {
+        await firestoreDb.collection("Tasks").doc(refId).set({
+          ...inMemoryTasks[index],
+          updatedAt: new Date().toISOString()
+        }, { merge: true });
+        console.log(`Successfully updated task ${refId} in Firestore Tasks`);
+      } catch (err) {
+        console.error(`Failed to update task ${refId} in Firestore:`, err);
+      }
+    }
+
     res.json({ success: true, task: inMemoryTasks[index] });
   } else {
     res.status(404).json({ success: false, message: "ไม่พบข้อมูลคำขออ้างอิง" });
@@ -357,14 +423,55 @@ app.put("/api/tasks/:refId", (req, res) => {
 });
 
 // Delete task
-app.delete("/api/tasks/:refId", (req, res) => {
+app.delete("/api/tasks/:refId", async (req, res) => {
   const { refId } = req.params;
   inMemoryTasks = inMemoryTasks.filter(t => t.refId !== refId);
+
+  // Delete from Firestore
+  const firestoreDb = getFirestoreDb();
+  if (firestoreDb) {
+    try {
+      await firestoreDb.collection("Tasks").doc(refId).delete();
+      console.log(`Successfully deleted task ${refId} from Firestore Tasks`);
+    } catch (err) {
+      console.error(`Failed to delete task ${refId} from Firestore:`, err);
+    }
+  }
+
   res.json({ success: true, message: `ลบคำขอ ${refId} เรียบร้อย` });
 });
 
 // Get all CRM members
 app.get("/api/members", async (req, res) => {
+  const firestoreDb = getFirestoreDb();
+  if (firestoreDb) {
+    try {
+      const collectionRef = firestoreDb.collection("CRM");
+      const snapshot = await collectionRef.get();
+      if (!snapshot.empty) {
+        const members: any[] = [];
+        snapshot.forEach(doc => {
+          const data = doc.data();
+          members.push({
+            name: data.name || data['ชื่อ-นามสกุล'] || data['ชื่อ'] || '',
+            crops: data.crops || data['พืชหลัก'] || '',
+            area: Number(data.area) || Number(data['พื้นที่เพาะปลูก']) || 0,
+            score: data.score || data['เกรดเกษตรกร'] || 'B',
+            debt: Number(data.debt) || Number(data['ยอดหนี้ OD']) || 0,
+            lastActive: data.lastActive || data['ออฟไลน์ล่าสุด'] || 'วันนี้ 10:45 น.',
+            ...data,
+            id: doc.id
+          });
+        });
+        inMemoryMembers = members;
+        isMembersLoaded = true;
+        return res.json(members);
+      }
+    } catch (err) {
+      console.error("Error reading CRM from Firestore:", err);
+    }
+  }
+
   if (!isMembersLoaded || inMemoryMembers.length === 0) {
     await loadMembersFromSheet();
   }
@@ -374,11 +481,30 @@ app.get("/api/members", async (req, res) => {
 // Sync CRM members from sheet
 app.post("/api/members/sync", async (req, res) => {
   await loadMembersFromSheet();
+
+  // Also sync to Firestore if database is available
+  const firestoreDb = getFirestoreDb();
+  if (firestoreDb) {
+    try {
+      const collectionRef = firestoreDb.collection("CRM");
+      const writePromises = inMemoryMembers.map(async (member) => {
+        await collectionRef.doc(member.id).set({
+          ...member,
+          syncedAt: new Date().toISOString()
+        });
+      });
+      await Promise.all(writePromises);
+      console.log(`Synced ${inMemoryMembers.length} members to Firestore CRM.`);
+    } catch (err) {
+      console.error("Failed to sync CRM list to Firestore:", err);
+    }
+  }
+
   res.json({ success: true, message: "ซิงค์รายชื่อสมาชิกกับ Google Sheets สำเร็จ", members: inMemoryMembers });
 });
 
 // Create new member
-app.post("/api/members", (req, res) => {
+app.post("/api/members", async (req, res) => {
   const newMember = req.body;
   if (!newMember.id) {
     newMember.id = `KST-${Math.floor(10000 + Math.random() * 90000)}`;
@@ -386,17 +512,56 @@ app.post("/api/members", (req, res) => {
   if (!newMember.lastActive) {
     newMember.lastActive = 'เพิ่งเปิดตัว';
   }
+  
+  // Format numeric values
+  if (newMember.area) newMember.area = Number(newMember.area);
+  if (newMember.debt) newMember.debt = Number(newMember.debt);
+
   inMemoryMembers.push(newMember);
+
+  // Save to Firestore
+  const firestoreDb = getFirestoreDb();
+  if (firestoreDb) {
+    try {
+      await firestoreDb.collection("CRM").doc(newMember.id).set({
+        ...newMember,
+        createdAt: new Date().toISOString()
+      });
+      console.log(`Successfully added member ${newMember.id} to Firestore CRM`);
+    } catch (err) {
+      console.error(`Failed to write new member ${newMember.id} to Firestore:`, err);
+    }
+  }
+
   res.json({ success: true, member: newMember });
 });
 
 // Update member
-app.put("/api/members/:id", (req, res) => {
+app.put("/api/members/:id", async (req, res) => {
   const { id } = req.params;
   const updates = req.body;
   const index = inMemoryMembers.findIndex(m => m.id === id);
   if (index !== -1) {
+    // Format numeric values if specified
+    if (updates.area !== undefined) updates.area = Number(updates.area);
+    if (updates.debt !== undefined) updates.debt = Number(updates.debt);
+
     inMemoryMembers[index] = { ...inMemoryMembers[index], ...updates };
+
+    // Update in Firestore
+    const firestoreDb = getFirestoreDb();
+    if (firestoreDb) {
+      try {
+        await firestoreDb.collection("CRM").doc(id).set({
+          ...inMemoryMembers[index],
+          updatedAt: new Date().toISOString()
+        }, { merge: true });
+        console.log(`Successfully updated member ${id} in Firestore CRM`);
+      } catch (err) {
+        console.error(`Failed to update member ${id} in Firestore:`, err);
+      }
+    }
+
     res.json({ success: true, member: inMemoryMembers[index] });
   } else {
     res.status(404).json({ success: false, message: "ไม่พบข้อมูลสมาชิก" });
@@ -404,9 +569,21 @@ app.put("/api/members/:id", (req, res) => {
 });
 
 // Delete member
-app.delete("/api/members/:id", (req, res) => {
+app.delete("/api/members/:id", async (req, res) => {
   const { id } = req.params;
   inMemoryMembers = inMemoryMembers.filter(m => m.id !== id);
+
+  // Delete from Firestore
+  const firestoreDb = getFirestoreDb();
+  if (firestoreDb) {
+    try {
+      await firestoreDb.collection("CRM").doc(id).delete();
+      console.log(`Successfully deleted member ${id} from Firestore CRM`);
+    } catch (err) {
+      console.error(`Failed to delete member ${id} from Firestore:`, err);
+    }
+  }
+
   res.json({ success: true, message: `ลบสมาชิก ${id} สำเร็จ` });
 });
 
