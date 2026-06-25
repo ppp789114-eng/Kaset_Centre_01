@@ -1,4 +1,6 @@
 import React, { useState, useEffect } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInWithPopup, GoogleAuthProvider, User as FirebaseUser } from 'firebase/auth';
 import { 
   LayoutDashboard, 
   Inbox, 
@@ -37,6 +39,21 @@ import {
   Database,
   CloudUpload
 } from 'lucide-react';
+
+// Firebase Client Config for Google Auth
+const firebaseConfig = {
+  projectId: "mythical-ceremony-xwjrd",
+  appId: "1:78807806056:web:495b79ce3487b3c17ecbdd",
+  apiKey: "AIzaSyBXZ2ybTR0i0WjUgMHvoau5M2GrllHM-Q0",
+  authDomain: "mythical-ceremony-xwjrd.firebaseapp.com",
+  storageBucket: "mythical-ceremony-xwjrd.firebasestorage.app",
+  messagingSenderId: "78807806056"
+};
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const provider = new GoogleAuthProvider();
+provider.addScope('https://www.googleapis.com/auth/spreadsheets');
 
 // Interfaces for State Management
 interface Task {
@@ -98,6 +115,13 @@ export default function App() {
   const [username, setUsername] = useState<string>('Admin');
   const [password, setPassword] = useState<string>('AdminAdmin');
   const [authError, setAuthError] = useState<string>('');
+
+  // --- Google Sheets OAuth State ---
+  const [googleAccessToken, setGoogleAccessToken] = useState<string | null>(() => {
+    return sessionStorage.getItem('google_sheets_token');
+  });
+  const [googleUser, setGoogleUser] = useState<FirebaseUser | null>(null);
+  const [isConnectingSheets, setIsConnectingSheets] = useState<boolean>(false);
 
   // --- Navigation & UI State ---
   const [currentView, setCurrentView] = useState<string>('dashboard');
@@ -366,7 +390,7 @@ export default function App() {
     try {
       const res = await fetch('/api/members', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify(memberData)
       });
       if (res.ok) {
@@ -393,7 +417,7 @@ export default function App() {
     try {
       const res = await fetch(`/api/members/${id}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify(updates)
       });
       if (res.ok) {
@@ -422,7 +446,10 @@ export default function App() {
   const handleDeleteMember = async (id: string) => {
     if (!confirm('คุณแน่ใจหรือไม่ที่จะลบรายชื่อสมาชิกรายนี้ออกจากฐานข้อมูลสหกรณ์?')) return;
     try {
-      const res = await fetch(`/api/members/${id}`, { method: 'DELETE' });
+      const res = await fetch(`/api/members/${id}`, { 
+        method: 'DELETE',
+        headers: getAuthHeaders()
+      });
       if (res.ok) {
         setMembers(prev => prev.filter(m => m.id !== id));
         triggerToast(`ลบรายชื่อสมาชิกสำเร็จ`, 'success');
@@ -713,13 +740,62 @@ export default function App() {
     triggerToast('ออกจากระบบเรียบร้อย', 'info');
   };
 
+  // --- Google Sheets Sync Helpers ---
+  const getAuthHeaders = (additionalHeaders: Record<string, string> = {}) => {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      ...additionalHeaders
+    };
+    if (googleAccessToken) {
+      headers['X-Google-Access-Token'] = googleAccessToken;
+      
+      const match = importSheetUrl.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+      const sheetId = match ? match[1] : '1XlVfneJ-RXvQW7jPUL5Am9jkt7KoMeAPNkRJ4NA-_D8';
+      headers['X-Google-Spreadsheet-Id'] = sheetId;
+    }
+    return headers;
+  };
+
+  const handleGoogleSignIn = async () => {
+    setIsConnectingSheets(true);
+    try {
+      const result = await signInWithPopup(auth, provider);
+      const credential = GoogleAuthProvider.credentialFromResult(result);
+      if (credential?.accessToken) {
+        setGoogleAccessToken(credential.accessToken);
+        setGoogleUser(result.user);
+        sessionStorage.setItem('google_sheets_token', credential.accessToken);
+        triggerToast(`เชื่อมต่อ Google Sheets สำเร็จ! บัญชี: ${result.user.email}`, 'success');
+      } else {
+        throw new Error('ไม่ได้รับ Access Token จากบัญชี Google');
+      }
+    } catch (err: any) {
+      console.error('Google Sign-In failed:', err);
+      triggerToast('ไม่สามารถเชื่อมต่อ Google Sheets ได้: ' + (err.message || ''), 'warning');
+    } finally {
+      setIsConnectingSheets(false);
+    }
+  };
+
+  const handleGoogleSignOut = async () => {
+    try {
+      await auth.signOut();
+      setGoogleAccessToken(null);
+      setGoogleUser(null);
+      sessionStorage.removeItem('google_sheets_token');
+      triggerToast('ยกเลิกการเชื่อมต่อ Google Sheets แล้ว', 'info');
+    } catch (err) {
+      console.error('Sign-out error:', err);
+    }
+  };
+
   // Task Actions
   const handleApproveTask = async (refId: string, customMsg?: string) => {
     try {
       // Call server PUT to set status or DELETE to complete
       const res = await fetch(`/api/tasks/${refId}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify({ status: 'ดำเนินการแล้ว' })
       });
       if (res.ok) {
@@ -1125,6 +1201,32 @@ export default function App() {
               <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin text-blue-500' : 'text-slate-500'}`} />
               <span>{isSyncing ? 'กำลังซิงค์ Google Sheets...' : 'ซิงค์ฐานข้อมูลสด'}</span>
             </button>
+
+            {/* Google Sheets Live Auth and Sync */}
+            {googleAccessToken ? (
+              <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200/60 px-3 py-1.5 rounded-xl text-[11px] font-bold text-emerald-700 shadow-sm">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                <span className="truncate max-w-[120px] hidden md:inline">เชื่อมต่อ Google Sheets แล้ว</span>
+                <span className="md:hidden">Sheets ต่อแล้ว</span>
+                <button 
+                  onClick={handleGoogleSignOut} 
+                  className="ml-1 text-slate-400 hover:text-red-500 transition-colors text-[10px] font-medium"
+                  title="ยกเลิกการเชื่อมต่อ"
+                >
+                  (ยกเลิก)
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={handleGoogleSignIn}
+                disabled={isConnectingSheets}
+                className="flex items-center gap-1.5 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 font-bold text-[11px] px-3 py-1.5 rounded-xl shadow-sm transition active:scale-95 disabled:opacity-50 cursor-pointer"
+                title="เชื่อมต่อกับ Google Account เพื่อเขียน/ลบข้อมูลลง Google Sheets หลังบ้านโดยตรง"
+              >
+                <CloudUpload className="w-3.5 h-3.5 text-blue-500" />
+                <span>{isConnectingSheets ? 'กำลังเชื่อมต่อ...' : 'เชื่อมต่อ Google Sheets'}</span>
+              </button>
+            )}
 
             {/* Live Operational Indicator */}
             <div className="flex items-center gap-2 bg-slate-100 border border-slate-200/60 px-3 py-1.5 rounded-full text-[11px] font-bold text-slate-600">

@@ -1,8 +1,8 @@
 import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
-import { initializeApp, getApps, getApp } from "firebase-admin/app";
-import { getFirestore, Firestore } from "firebase-admin/firestore";
+import { initializeApp as initClientApp, getApps as getClientApps, getApp as getClientApp } from "firebase/app";
+import { getFirestore as getClientFirestore, collection, getDocs, doc, setDoc, deleteDoc, addDoc, Firestore } from "firebase/firestore";
 import fs from "fs";
 
 const app = express();
@@ -206,6 +206,216 @@ function parseMemberCSV(text: string): Member[] {
   return parsed;
 }
 
+// Google Sheets API Integration Helpers
+async function googleSheetsRequest(endpoint: string, method: string, token: string, body?: any) {
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${endpoint}`;
+  const headers: any = {
+    'Authorization': `Bearer ${token}`,
+    'Content-Type': 'application/json'
+  };
+  const options: any = {
+    method,
+    headers
+  };
+  if (body) {
+    options.body = JSON.stringify(body);
+  }
+  const response = await fetch(url, options);
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Google Sheets API error: ${response.status} - ${errText}`);
+  }
+  return await response.json();
+}
+
+async function syncMemberToGoogleSheet(spreadsheetId: string, token: string, member: any, isDelete: boolean = false) {
+  try {
+    console.log(`Syncing member ${member.id} to Google Sheet ${spreadsheetId} (delete=${isDelete})...`);
+    // 1. Fetch current values of CRM sheet
+    const crmData = await googleSheetsRequest(`${spreadsheetId}/values/CRM!A:G`, 'GET', token);
+    const rows = crmData.values || [];
+    if (rows.length === 0) {
+      throw new Error("CRM sheet is empty or has no headers");
+    }
+
+    const headers = rows[0].map((h: string) => h.toLowerCase().replace(/['"()]/g, '').trim());
+    const findIndex = (aliases: string[]): number => {
+      return headers.findIndex((h: string) => aliases.some(alias => h.includes(alias)));
+    };
+
+    const idIdx = findIndex(['รหัสสมาชิก', 'memberid', 'member_id', 'id']);
+    const nameIdx = findIndex(['ชื่อสมาชิก', 'ชื่อเกษตรกร', 'ชื่อ', 'membername', 'name', 'ชื่อ-นามสกุล']);
+    const cropsIdx = findIndex(['พืชผลหลัก', 'พืชผล', 'พืชหลัก', 'crops', 'crop', 'ประเภทคำขอ']);
+    const areaIdx = findIndex(['พื้นที่', 'ที่อยู่', 'area', 'address', 'ข้อมูลเพิ่มเติม']);
+    const scoreIdx = findIndex(['คะแนนความน่าเชื่อถือ', 'คะแนน', 'agri-score', 'score', 'status']);
+    const debtIdx = findIndex(['ยอดหนี้', 'หนี้', 'debt', 'amount', 'ยอดหนี้ od']);
+    const lastActiveIdx = findIndex(['ออฟไลน์ล่าสุด', 'เข้าใช้งานล่าสุด', 'lastactive', 'active', 'สถานะ']);
+
+    // Find if member already exists in rows (headers are at row index 0, so rows start at index 1)
+    let rowIndex = -1;
+    if (idIdx !== -1) {
+      for (let i = 1; i < rows.length; i++) {
+        const row = rows[i];
+        if (row[idIdx] && row[idIdx].trim() === member.id) {
+          rowIndex = i + 1; // 1-based index for range
+          break;
+        }
+      }
+    }
+
+    if (isDelete) {
+      if (rowIndex !== -1) {
+        // Get sheetId for "CRM" sheet
+        const meta = await googleSheetsRequest(spreadsheetId, 'GET', token);
+        const sheet = meta.sheets.find((s: any) => s.properties.title === 'CRM');
+        const sheetId = sheet ? sheet.properties.sheetId : 0;
+
+        // Delete row using batchUpdate
+        await googleSheetsRequest(`${spreadsheetId}:batchUpdate`, 'POST', token, {
+          requests: [
+            {
+              deleteDimension: {
+                range: {
+                  sheetId,
+                  dimension: "ROWS",
+                  startIndex: rowIndex - 1, // 0-based index
+                  endIndex: rowIndex
+                }
+              }
+            }
+          ]
+        });
+        console.log(`Successfully deleted member ${member.id} from CRM Google Sheet on row ${rowIndex}`);
+      }
+      return;
+    }
+
+    // Build the row array matching original columns of CRM sheet
+    const rowLength = Math.max(idIdx, nameIdx, cropsIdx, areaIdx, scoreIdx, debtIdx, lastActiveIdx) + 1;
+    const newRow = new Array(rowLength).fill("");
+    if (idIdx !== -1) newRow[idIdx] = member.id;
+    if (nameIdx !== -1) newRow[nameIdx] = member.name;
+    if (cropsIdx !== -1) newRow[cropsIdx] = member.crops;
+    if (areaIdx !== -1) newRow[areaIdx] = member.area;
+    if (scoreIdx !== -1) newRow[scoreIdx] = member.score;
+    if (debtIdx !== -1) newRow[debtIdx] = String(member.debt);
+    if (lastActiveIdx !== -1) newRow[lastActiveIdx] = member.lastActive;
+
+    if (rowIndex !== -1) {
+      // Update existing row
+      const range = `CRM!A${rowIndex}:${String.fromCharCode(65 + rowLength - 1)}${rowIndex}`;
+      await googleSheetsRequest(`${spreadsheetId}/values/${range}?valueInputOption=USER_ENTERED`, 'PUT', token, {
+        values: [newRow]
+      });
+      console.log(`Successfully updated member ${member.id} in CRM Google Sheet on row ${rowIndex}`);
+    } else {
+      // Append new row
+      await googleSheetsRequest(`${spreadsheetId}/values/CRM!A:G:append?valueInputOption=USER_ENTERED`, 'POST', token, {
+        values: [newRow]
+      });
+      console.log(`Successfully appended member ${member.id} to CRM Google Sheet`);
+    }
+  } catch (error) {
+    console.error("Error syncing CRM member to Google Sheets:", error);
+  }
+}
+
+async function syncTaskToGoogleSheet(spreadsheetId: string, token: string, task: any, isDelete: boolean = false) {
+  try {
+    console.log(`Syncing task ${task.refId} to Google Sheet ${spreadsheetId} (delete=${isDelete})...`);
+    // 1. Fetch current values of Tasks sheet
+    const tasksData = await googleSheetsRequest(`${spreadsheetId}/values/Tasks!A:I`, 'GET', token);
+    const rows = tasksData.values || [];
+    if (rows.length === 0) {
+      throw new Error("Tasks sheet is empty or has no headers");
+    }
+
+    const headers = rows[0].map((h: string) => h.toLowerCase().replace(/['"()]/g, '').trim());
+    const findIndex = (aliases: string[]): number => {
+      return headers.findIndex((h: string) => aliases.some(alias => h.includes(alias)));
+    };
+
+    const refIdIdx = findIndex(['รหัสอ้างอิง', 'ref_id', 'refid', 'id']);
+    const typeIdx = findIndex(['ประเภท', 'type']);
+    const memberIdIdx = findIndex(['รหัสสมาชิก', 'member_id', 'memberid']);
+    const memberNameIdx = findIndex(['ชื่อสมาชิก', 'ชื่อเกษตรกร', 'ชื่อ', 'name']);
+    const detailsIdx = findIndex(['รายละเอียด', 'details']);
+    const additionalInfoIdx = findIndex(['ข้อมูลเพิ่มเติม', 'info']);
+    const statusIdx = findIndex(['สถานะ', 'status']);
+    const scoreIdx = findIndex(['คะแนนความน่าเชื่อถือ', 'คะแนน', 'score']);
+    const actionLabelIdx = findIndex(['ปุ่มดำเนินการ', 'action']);
+
+    // Find if task already exists in rows (headers are at row index 0, so rows start at index 1)
+    let rowIndex = -1;
+    if (refIdIdx !== -1) {
+      for (let i = 1; i < rows.length; i++) {
+        const row = rows[i];
+        if (row[refIdIdx] && row[refIdIdx].trim() === task.refId) {
+          rowIndex = i + 1; // 1-based index for range
+          break;
+        }
+      }
+    }
+
+    if (isDelete) {
+      if (rowIndex !== -1) {
+        // Get sheetId for "Tasks" sheet
+        const meta = await googleSheetsRequest(spreadsheetId, 'GET', token);
+        const sheet = meta.sheets.find((s: any) => s.properties.title === 'Tasks');
+        const sheetId = sheet ? sheet.properties.sheetId : 0;
+
+        // Delete row using batchUpdate
+        await googleSheetsRequest(`${spreadsheetId}:batchUpdate`, 'POST', token, {
+          requests: [
+            {
+              deleteDimension: {
+                range: {
+                  sheetId,
+                  dimension: "ROWS",
+                  startIndex: rowIndex - 1, // 0-based index
+                  endIndex: rowIndex
+                }
+              }
+            }
+          ]
+        });
+        console.log(`Successfully deleted task ${task.refId} from Tasks Google Sheet on row ${rowIndex}`);
+      }
+      return;
+    }
+
+    // Build the row array matching original columns of Tasks sheet
+    const rowLength = Math.max(refIdIdx, typeIdx, memberIdIdx, memberNameIdx, detailsIdx, additionalInfoIdx, statusIdx, scoreIdx, actionLabelIdx) + 1;
+    const newRow = new Array(rowLength).fill("");
+    if (refIdIdx !== -1) newRow[refIdIdx] = task.refId;
+    if (typeIdx !== -1) newRow[typeIdx] = task.type;
+    if (memberIdIdx !== -1) newRow[memberIdIdx] = task.memberId;
+    if (memberNameIdx !== -1) newRow[memberNameIdx] = task.memberName;
+    if (detailsIdx !== -1) newRow[detailsIdx] = task.details;
+    if (additionalInfoIdx !== -1) newRow[additionalInfoIdx] = task.additionalInfo;
+    if (statusIdx !== -1) newRow[statusIdx] = task.status;
+    if (scoreIdx !== -1) newRow[scoreIdx] = task.score;
+    if (actionLabelIdx !== -1) newRow[actionLabelIdx] = task.actionLabel;
+
+    if (rowIndex !== -1) {
+      // Update existing row
+      const range = `Tasks!A${rowIndex}:${String.fromCharCode(65 + rowLength - 1)}${rowIndex}`;
+      await googleSheetsRequest(`${spreadsheetId}/values/${range}?valueInputOption=USER_ENTERED`, 'PUT', token, {
+        values: [newRow]
+      });
+      console.log(`Successfully updated task ${task.refId} in Tasks Google Sheet on row ${rowIndex}`);
+    } else {
+      // Append new row
+      await googleSheetsRequest(`${spreadsheetId}/values/Tasks!A:I:append?valueInputOption=USER_ENTERED`, 'POST', token, {
+        values: [newRow]
+      });
+      console.log(`Successfully appended task ${task.refId} to Tasks Google Sheet`);
+    }
+  } catch (error) {
+    console.error("Error syncing Task to Google Sheets:", error);
+  }
+}
+
 // Fetch helper to populate CRM member in-memory database
 async function loadMembersFromSheet() {
   const sheetUrls = [
@@ -334,12 +544,12 @@ app.get("/api/tasks", async (req, res) => {
   const firestoreDb = getFirestoreDb();
   if (firestoreDb) {
     try {
-      const collectionRef = firestoreDb.collection("Tasks");
-      const snapshot = await collectionRef.get();
+      const collectionRef = collection(firestoreDb, "Tasks");
+      const snapshot = await getDocs(collectionRef);
       if (!snapshot.empty) {
         const tasks: any[] = [];
-        snapshot.forEach(doc => {
-          const data = doc.data();
+        snapshot.forEach(docSnap => {
+          const data = docSnap.data();
           tasks.push({
             type: data.type || '',
             memberId: data.memberId || '',
@@ -350,7 +560,7 @@ app.get("/api/tasks", async (req, res) => {
             score: data.score || 'B',
             actionLabel: data.actionLabel || 'ดำเนินการ',
             ...data,
-            refId: doc.id
+            refId: docSnap.id
           });
         });
         inMemoryTasks = tasks;
@@ -376,9 +586,9 @@ app.post("/api/tasks/sync", async (req, res) => {
   const firestoreDb = getFirestoreDb();
   if (firestoreDb) {
     try {
-      const collectionRef = firestoreDb.collection("Tasks");
       const writePromises = inMemoryTasks.map(async (task) => {
-        await collectionRef.doc(task.refId).set({
+        const docRef = doc(firestoreDb, "Tasks", task.refId);
+        await setDoc(docRef, {
           ...task,
           syncedAt: new Date().toISOString()
         });
@@ -406,7 +616,8 @@ app.put("/api/tasks/:refId", async (req, res) => {
     const firestoreDb = getFirestoreDb();
     if (firestoreDb) {
       try {
-        await firestoreDb.collection("Tasks").doc(refId).set({
+        const docRef = doc(firestoreDb, "Tasks", refId);
+        await setDoc(docRef, {
           ...inMemoryTasks[index],
           updatedAt: new Date().toISOString()
         }, { merge: true });
@@ -414,6 +625,13 @@ app.put("/api/tasks/:refId", async (req, res) => {
       } catch (err) {
         console.error(`Failed to update task ${refId} in Firestore:`, err);
       }
+    }
+
+    // Google Sheets live sync if OAuth token is provided
+    const googleToken = req.headers['x-google-access-token'] as string;
+    const spreadsheetId = req.headers['x-google-spreadsheet-id'] as string || '1XlVfneJ-RXvQW7jPUL5Am9jkt7KoMeAPNkRJ4NA-_D8';
+    if (googleToken) {
+      await syncTaskToGoogleSheet(spreadsheetId, googleToken, inMemoryTasks[index], false);
     }
 
     res.json({ success: true, task: inMemoryTasks[index] });
@@ -431,11 +649,19 @@ app.delete("/api/tasks/:refId", async (req, res) => {
   const firestoreDb = getFirestoreDb();
   if (firestoreDb) {
     try {
-      await firestoreDb.collection("Tasks").doc(refId).delete();
+      const docRef = doc(firestoreDb, "Tasks", refId);
+      await deleteDoc(docRef);
       console.log(`Successfully deleted task ${refId} from Firestore Tasks`);
     } catch (err) {
       console.error(`Failed to delete task ${refId} from Firestore:`, err);
     }
+  }
+
+  // Google Sheets live sync if OAuth token is provided
+  const googleToken = req.headers['x-google-access-token'] as string;
+  const spreadsheetId = req.headers['x-google-spreadsheet-id'] as string || '1XlVfneJ-RXvQW7jPUL5Am9jkt7KoMeAPNkRJ4NA-_D8';
+  if (googleToken) {
+    await syncTaskToGoogleSheet(spreadsheetId, googleToken, { refId }, true);
   }
 
   res.json({ success: true, message: `ลบคำขอ ${refId} เรียบร้อย` });
@@ -446,12 +672,12 @@ app.get("/api/members", async (req, res) => {
   const firestoreDb = getFirestoreDb();
   if (firestoreDb) {
     try {
-      const collectionRef = firestoreDb.collection("CRM");
-      const snapshot = await collectionRef.get();
+      const collectionRef = collection(firestoreDb, "CRM");
+      const snapshot = await getDocs(collectionRef);
       if (!snapshot.empty) {
         const members: any[] = [];
-        snapshot.forEach(doc => {
-          const data = doc.data();
+        snapshot.forEach(docSnap => {
+          const data = docSnap.data();
           members.push({
             name: data.name || data['ชื่อ-นามสกุล'] || data['ชื่อ'] || '',
             crops: data.crops || data['พืชหลัก'] || '',
@@ -460,7 +686,7 @@ app.get("/api/members", async (req, res) => {
             debt: Number(data.debt) || Number(data['ยอดหนี้ OD']) || 0,
             lastActive: data.lastActive || data['ออฟไลน์ล่าสุด'] || 'วันนี้ 10:45 น.',
             ...data,
-            id: doc.id
+            id: docSnap.id
           });
         });
         inMemoryMembers = members;
@@ -486,9 +712,9 @@ app.post("/api/members/sync", async (req, res) => {
   const firestoreDb = getFirestoreDb();
   if (firestoreDb) {
     try {
-      const collectionRef = firestoreDb.collection("CRM");
       const writePromises = inMemoryMembers.map(async (member) => {
-        await collectionRef.doc(member.id).set({
+        const docRef = doc(firestoreDb, "CRM", member.id);
+        await setDoc(docRef, {
           ...member,
           syncedAt: new Date().toISOString()
         });
@@ -523,7 +749,8 @@ app.post("/api/members", async (req, res) => {
   const firestoreDb = getFirestoreDb();
   if (firestoreDb) {
     try {
-      await firestoreDb.collection("CRM").doc(newMember.id).set({
+      const docRef = doc(firestoreDb, "CRM", newMember.id);
+      await setDoc(docRef, {
         ...newMember,
         createdAt: new Date().toISOString()
       });
@@ -531,6 +758,13 @@ app.post("/api/members", async (req, res) => {
     } catch (err) {
       console.error(`Failed to write new member ${newMember.id} to Firestore:`, err);
     }
+  }
+
+  // Google Sheets live sync if OAuth token is provided
+  const googleToken = req.headers['x-google-access-token'] as string;
+  const spreadsheetId = req.headers['x-google-spreadsheet-id'] as string || '1XlVfneJ-RXvQW7jPUL5Am9jkt7KoMeAPNkRJ4NA-_D8';
+  if (googleToken) {
+    await syncMemberToGoogleSheet(spreadsheetId, googleToken, newMember, false);
   }
 
   res.json({ success: true, member: newMember });
@@ -552,7 +786,8 @@ app.put("/api/members/:id", async (req, res) => {
     const firestoreDb = getFirestoreDb();
     if (firestoreDb) {
       try {
-        await firestoreDb.collection("CRM").doc(id).set({
+        const docRef = doc(firestoreDb, "CRM", id);
+        await setDoc(docRef, {
           ...inMemoryMembers[index],
           updatedAt: new Date().toISOString()
         }, { merge: true });
@@ -560,6 +795,13 @@ app.put("/api/members/:id", async (req, res) => {
       } catch (err) {
         console.error(`Failed to update member ${id} in Firestore:`, err);
       }
+    }
+
+    // Google Sheets live sync if OAuth token is provided
+    const googleToken = req.headers['x-google-access-token'] as string;
+    const spreadsheetId = req.headers['x-google-spreadsheet-id'] as string || '1XlVfneJ-RXvQW7jPUL5Am9jkt7KoMeAPNkRJ4NA-_D8';
+    if (googleToken) {
+      await syncMemberToGoogleSheet(spreadsheetId, googleToken, inMemoryMembers[index], false);
     }
 
     res.json({ success: true, member: inMemoryMembers[index] });
@@ -577,11 +819,19 @@ app.delete("/api/members/:id", async (req, res) => {
   const firestoreDb = getFirestoreDb();
   if (firestoreDb) {
     try {
-      await firestoreDb.collection("CRM").doc(id).delete();
+      const docRef = doc(firestoreDb, "CRM", id);
+      await deleteDoc(docRef);
       console.log(`Successfully deleted member ${id} from Firestore CRM`);
     } catch (err) {
       console.error(`Failed to delete member ${id} from Firestore:`, err);
     }
+  }
+
+  // Google Sheets live sync if OAuth token is provided
+  const googleToken = req.headers['x-google-access-token'] as string;
+  const spreadsheetId = req.headers['x-google-spreadsheet-id'] as string || '1XlVfneJ-RXvQW7jPUL5Am9jkt7KoMeAPNkRJ4NA-_D8';
+  if (googleToken) {
+    await syncMemberToGoogleSheet(spreadsheetId, googleToken, { id }, true);
   }
 
   res.json({ success: true, message: `ลบสมาชิก ${id} สำเร็จ` });
@@ -597,19 +847,24 @@ function getFirestoreDb() {
     const configPath = path.join(process.cwd(), "firebase-applet-config.json");
     if (fs.existsSync(configPath)) {
       const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-      if (getApps().length === 0) {
-        initializeApp({
+      if (getClientApps().length === 0) {
+        initClientApp({
+          apiKey: config.apiKey,
+          authDomain: config.authDomain,
           projectId: config.projectId,
+          storageBucket: config.storageBucket,
+          messagingSenderId: config.messagingSenderId,
+          appId: config.appId
         });
       }
-      db = getFirestore(getApp(), config.firestoreDatabaseId);
-      console.log("Firebase Admin initialized successfully with projectId:", config.projectId);
+      db = getClientFirestore(getClientApp(), config.firestoreDatabaseId);
+      console.log("Firebase Client SDK initialized successfully with projectId:", config.projectId);
       return db;
     } else {
       console.warn("firebase-applet-config.json not found. Firestore cannot be initialized.");
     }
   } catch (error) {
-    console.error("Failed to initialize Firebase Admin:", error);
+    console.error("Failed to initialize Firebase Client SDK:", error);
   }
   return null;
 }
@@ -718,8 +973,6 @@ app.post("/api/import-sheet", async (req, res) => {
     }
 
     const collectionName = sheetName.trim();
-    const collectionRef = firestoreDb.collection(collectionName);
-
     let successCount = 0;
     const docIdFields = ['รหัสสมาชิก', 'memberid', 'member_id', 'id', 'refid', 'ref_id', 'รหัส'];
 
@@ -737,12 +990,14 @@ app.post("/api/import-sheet", async (req, res) => {
 
       try {
         if (docId) {
-          await collectionRef.doc(docId).set({
+          const docRef = doc(firestoreDb, collectionName, docId);
+          await setDoc(docRef, {
             ...rowObj,
             importedAt: new Date().toISOString()
           });
         } else {
-          await collectionRef.add({
+          const collectionRef = collection(firestoreDb, collectionName);
+          await addDoc(collectionRef, {
             ...rowObj,
             importedAt: new Date().toISOString()
           });
