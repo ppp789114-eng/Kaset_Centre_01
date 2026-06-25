@@ -1,0 +1,6 @@
+{
+  "name": "Kaset Centre Admin",
+  "description": "Professional administrative dashboard and operations portal for Kaset Centre Cooperative.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
