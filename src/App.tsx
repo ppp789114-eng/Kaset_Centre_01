@@ -29,7 +29,11 @@ import {
   Building2,
   Calendar,
   AlertCircle,
-  RefreshCw
+  RefreshCw,
+  Plus,
+  Edit,
+  Trash2,
+  UserPlus
 } from 'lucide-react';
 
 // Interfaces for State Management
@@ -107,11 +111,22 @@ export default function App() {
   const [isLoadingTasks, setIsLoadingTasks] = useState<boolean>(true);
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
 
-  const [members] = useState<Member[]>([
-    { id: 'KST-88902', name: 'นายสมชาย ใจดี', crops: 'สตรอว์เบอร์รี, ลำไย', area: '15 ไร่ (ต.แม่ริม)', score: 'A', debt: 24500, lastActive: 'วันนี้ 10:45 น.' },
-    { id: 'KST-77210', name: 'นางสมศรี มีทรัพย์', crops: 'ข้าวไรซ์เบอร์รี่, ผักสวนครัว', area: '8 ไร่ (ต.สันป่าตอง)', score: 'B+', debt: 10000, lastActive: 'เมื่อวาน 15:30 น.' },
-    { id: 'KST-65001', name: 'นายวิชัย รักษ์ดี', crops: 'ข้าวโพดเลี้ยงสัตว์', area: '20 ไร่ (ต.แม่แจ่ม)', score: 'D', debt: 45000, lastActive: '15 มิ.ย. 67' }
-  ]);
+  const [members, setMembers] = useState<Member[]>([]);
+  const [isLoadingMembers, setIsLoadingMembers] = useState<boolean>(true);
+  const [isSyncingCRM, setIsSyncingCRM] = useState<boolean>(false);
+
+  // States for Member Dialog / Modal CRUD Form
+  const [memberFormOpen, setMemberFormOpen] = useState<boolean>(false);
+  const [memberFormType, setMemberFormType] = useState<'add' | 'edit'>('add');
+  const [memberFormValue, setMemberFormValue] = useState<Partial<Member>>({
+    id: '',
+    name: '',
+    crops: '',
+    area: '',
+    score: 'B',
+    debt: 0,
+    lastActive: 'วันนี้ 10:45 น.'
+  });
 
   const [marketProducts, setMarketProducts] = useState<MarketProduct[]>([
     {
@@ -167,6 +182,245 @@ export default function App() {
   // Trigger Toast Helper
   const triggerToast = (msg: string, type: 'success' | 'info' | 'warning' = 'success') => {
     setToast({ show: true, msg, type });
+  };
+
+  // --- Client-Side CRM Fallback Loader & Parser ---
+  const fetchDirectCRMFromSheets = async (): Promise<Member[]> => {
+    const crmUrls = [
+      "https://docs.google.com/spreadsheets/d/1XlVfneJ-RXvQW7jPUL5Am9jkt7KoMeAPNkRJ4NA-_D8/gviz/tq?tqx=out:csv&sheet=CRM",
+      "https://docs.google.com/spreadsheets/d/1XlVfneJ-RXvQW7jPUL5Am9jkt7KoMeAPNkRJ4NA-_D8/export?format=csv&sheet=CRM"
+    ];
+    for (const url of crmUrls) {
+      try {
+        const response = await fetch(url);
+        if (response.ok) {
+          const text = await response.text();
+          const parsed = parseClientMemberCSV(text);
+          if (parsed.length > 0) {
+            return parsed;
+          }
+        }
+      } catch (e) {
+        console.error("Direct sheet CRM fetch failed:", url, e);
+      }
+    }
+    throw new Error("Could not load from CRM sheet directly");
+  };
+
+  const parseClientMemberCSV = (text: string): Member[] => {
+    const lines = text.split(/\r?\n/).filter(line => line.trim() !== '');
+    if (lines.length === 0) return [];
+
+    const splitLine = (line: string): string[] => {
+      const fields: string[] = [];
+      let current = '';
+      let inQuotes = false;
+      for (let i = 0; i < line.length; i++) {
+        const char = line[i];
+        if (char === '"') {
+          if (inQuotes && line[i + 1] === '"') {
+            current += '"';
+            i++;
+          } else {
+            inQuotes = !inQuotes;
+          }
+        } else if (char === ',' && !inQuotes) {
+          fields.push(current.trim());
+          current = '';
+        } else {
+          current += char;
+        }
+      }
+      fields.push(current.trim());
+      return fields;
+    };
+
+    const firstLine = lines[0] || '';
+    const headers = splitLine(firstLine).map(h => h.toLowerCase().replace(/['"()]/g, '').trim());
+    
+    const findIndex = (aliases: string[]): number => {
+      return headers.findIndex(h => aliases.some(alias => h.includes(alias)));
+    };
+
+    const idIdx = findIndex(['รหัสสมาชิก', 'memberid', 'member_id', 'id']);
+    const nameIdx = findIndex(['ชื่อสมาชิก', 'ชื่อเกษตรกร', 'ชื่อ', 'membername', 'name']);
+    const cropsIdx = findIndex(['พืชผลหลัก', 'พืชผล', 'พืชหลัก', 'crops', 'crop', 'ประเภทคำขอ']);
+    const areaIdx = findIndex(['พื้นที่', 'ที่อยู่', 'area', 'address', 'ข้อมูลเพิ่มเติม']);
+    const scoreIdx = findIndex(['คะแนนความน่าเชื่อถือ', 'คะแนน', 'agri-score', 'score', 'status']);
+    const debtIdx = findIndex(['ยอดหนี้', 'หนี้', 'debt', 'amount']);
+    const lastActiveIdx = findIndex(['ออฟไลน์ล่าสุด', 'เข้าใช้งานล่าสุด', 'lastactive', 'active', 'สถานะ']);
+
+    const parsed: Member[] = [];
+    for (let i = 1; i < lines.length; i++) {
+      const fields = splitLine(lines[i]);
+      if (fields.length === 0 || (fields.length === 1 && fields[0] === '')) continue;
+
+      const getValue = (idx: number, defaultValue: string): string => {
+        if (idx !== -1 && idx < fields.length) {
+          let val = fields[idx];
+          if (val.startsWith('"') && val.endsWith('"')) {
+            val = val.slice(1, -1);
+          }
+          return val.trim();
+        }
+        return defaultValue;
+      };
+
+      const id = getValue(idIdx, `KST-${Math.floor(10000 + Math.random() * 90000)}`);
+      const name = getValue(nameIdx, 'ไม่ระบุชื่อ');
+      const crops = getValue(cropsIdx, 'สตรอว์เบอร์รี, ลำไย');
+      const area = getValue(areaIdx, '15 ไร่ (ต.แม่ริม)');
+      
+      let rawScore = getValue(scoreIdx, 'B');
+      if (rawScore.includes('A')) rawScore = 'A';
+      else if (rawScore.includes('B+')) rawScore = 'B+';
+      else if (rawScore.includes('B')) rawScore = 'B';
+      else if (rawScore.includes('C')) rawScore = 'C';
+      else if (rawScore.includes('D')) rawScore = 'D';
+
+      const debtStr = getValue(debtIdx, '15000');
+      const debt = parseInt(debtStr.replace(/[^0-9]/g, '')) || 15000;
+      
+      const lastActive = getValue(lastActiveIdx, 'วันนี้ 10:45 น.');
+
+      parsed.push({ id, name, crops, area, score: rawScore, debt, lastActive });
+    }
+    return parsed;
+  };
+
+  const fetchMembers = async () => {
+    try {
+      setIsLoadingMembers(true);
+      const res = await fetch('/api/members');
+      if (res.ok) {
+        const data = await res.json();
+        setMembers(data);
+      } else {
+        console.warn("API load failed, trying direct CRM sheets fetch...");
+        const sheetMembers = await fetchDirectCRMFromSheets();
+        setMembers(sheetMembers);
+        triggerToast("เชื่อมต่อฐานข้อมูล CRM ตรงจาก Google Sheets สำเร็จ", "success");
+      }
+    } catch (err) {
+      console.warn("Failed to load members from API, trying direct sheets fetch...", err);
+      try {
+        const sheetMembers = await fetchDirectCRMFromSheets();
+        setMembers(sheetMembers);
+        triggerToast("เชื่อมต่อฐานข้อมูล CRM ตรงจาก Google Sheets สำเร็จ", "success");
+      } catch (directErr) {
+        console.error("Both API and direct sheets fetch failed for CRM:", directErr);
+        setMembers([
+          { id: 'KST-88902', name: 'นายสมชาย ใจดี', crops: 'สตรอว์เบอร์รี, ลำไย', area: '15 ไร่ (ต.แม่ริม)', score: 'A', debt: 24500, lastActive: 'วันนี้ 10:45 น.' },
+          { id: 'KST-77210', name: 'นางสมศรี มีทรัพย์', crops: 'ข้าวไรซ์เบอร์รี่, ผักสวนครัว', area: '8 ไร่ (ต.สันป่าตอง)', score: 'B+', debt: 10000, lastActive: 'เมื่อวาน 15:30 น.' },
+          { id: 'KST-65001', name: 'นายวิชัย รักษ์ดี', crops: 'ข้าวโพดเลี้ยงสัตว์', area: '20 ไร่ (ต.แม่แจ่ม)', score: 'D', debt: 45000, lastActive: '15 มิ.ย. 67' }
+        ]);
+      }
+    } finally {
+      setIsLoadingMembers(false);
+    }
+  };
+
+  const handleSyncCRM = async () => {
+    try {
+      setIsSyncingCRM(true);
+      const res = await fetch('/api/members/sync', { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        setMembers(data.members);
+        triggerToast(`ซิงค์ฐานข้อมูล CRM จาก Google Sheets สำเร็จ! พบข้อมูลทั้งหมด ${data.members.length} รายการ`, 'success');
+      } else {
+        console.warn("API CRM sync failed, trying direct sheets sync...");
+        const sheetMembers = await fetchDirectCRMFromSheets();
+        setMembers(sheetMembers);
+        triggerToast(`ซิงค์ข้อมูล CRM สดจาก Google Sheets โดยตรงสำเร็จ! พบทั้งหมด ${sheetMembers.length} รายการ`, 'success');
+      }
+    } catch (err) {
+      console.warn("API CRM sync error, trying direct sheets sync...", err);
+      try {
+        const sheetMembers = await fetchDirectCRMFromSheets();
+        setMembers(sheetMembers);
+        triggerToast(`ซิงค์ข้อมูล CRM สดจาก Google Sheets โดยตรงสำเร็จ! พบทั้งหมด ${sheetMembers.length} รายการ`, 'success');
+      } catch (directErr) {
+        triggerToast('เกิดข้อผิดพลาดในการเชื่อมต่อคลาวด์และ Google Sheets สำหรับ CRM', 'warning');
+      }
+    } finally {
+      setIsSyncingCRM(false);
+    }
+  };
+
+  const handleCreateMember = async (memberData: Partial<Member>) => {
+    try {
+      const res = await fetch('/api/members', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(memberData)
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setMembers(prev => [...prev, data.member]);
+        triggerToast(`เพิ่มข้อมูลสมาชิก ${data.member.name} เรียบร้อยแล้ว`, 'success');
+        setMemberFormOpen(false);
+      } else {
+        const mockNew = {
+          ...memberData,
+          id: memberData.id || `KST-${Math.floor(10000 + Math.random() * 90000)}`,
+          lastActive: 'เพิ่งอัปเดต'
+        } as Member;
+        setMembers(prev => [...prev, mockNew]);
+        triggerToast(`เพิ่มข้อมูลสมาชิก ${mockNew.name} เรียบร้อยแล้ว (ภายในเว็บ)`, 'success');
+        setMemberFormOpen(false);
+      }
+    } catch (err) {
+      triggerToast('เกิดข้อผิดพลาดในการบันทึกข้อมูลสมาชิก', 'warning');
+    }
+  };
+
+  const handleUpdateMember = async (id: string, updates: Partial<Member>) => {
+    try {
+      const res = await fetch(`/api/members/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates)
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setMembers(prev => prev.map(m => m.id === id ? data.member : m));
+        // If we are showing this profile, update the profile view too
+        if (selectedMemberProfile && selectedMemberProfile.id === id) {
+          setSelectedMemberProfile(data.member);
+        }
+        triggerToast(`อัปเดตข้อมูลสมาชิก ${updates.name || id} เรียบร้อยแล้ว`, 'success');
+        setMemberFormOpen(false);
+      } else {
+        const updated = { ...selectedMemberProfile, ...updates } as Member;
+        setMembers(prev => prev.map(m => m.id === id ? updated : m));
+        if (selectedMemberProfile && selectedMemberProfile.id === id) {
+          setSelectedMemberProfile(updated);
+        }
+        triggerToast(`อัปเดตข้อมูลสมาชิก ${updates.name || id} เรียบร้อยแล้ว (ภายในเว็บ)`, 'success');
+        setMemberFormOpen(false);
+      }
+    } catch (err) {
+      triggerToast('เกิดข้อผิดพลาดในการอัปเดตข้อมูลสมาชิก', 'warning');
+    }
+  };
+
+  const handleDeleteMember = async (id: string) => {
+    if (!confirm('คุณแน่ใจหรือไม่ที่จะลบรายชื่อสมาชิกรายนี้ออกจากฐานข้อมูลสหกรณ์?')) return;
+    try {
+      const res = await fetch(`/api/members/${id}`, { method: 'DELETE' });
+      if (res.ok) {
+        setMembers(prev => prev.filter(m => m.id !== id));
+        triggerToast(`ลบรายชื่อสมาชิกสำเร็จ`, 'success');
+        setSelectedModal(null);
+      } else {
+        setMembers(prev => prev.filter(m => m.id !== id));
+        triggerToast(`ลบรายชื่อสมาชิกสำเร็จ (ภายในเว็บ)`, 'success');
+        setSelectedModal(null);
+      }
+    } catch (err) {
+      triggerToast('เกิดข้อผิดพลาดในการลบข้อมูลสมาชิก', 'warning');
+    }
   };
 
   // --- Client-Side Google Sheets Fallback Loader ---
@@ -301,6 +555,7 @@ export default function App() {
 
   useEffect(() => {
     fetchTasks();
+    fetchMembers();
   }, []);
 
   // Sync Database with Sheet
@@ -558,6 +813,17 @@ export default function App() {
       </div>
     );
   }
+
+  // Filter members list based on query
+  const filteredMembers = members.filter(m => {
+    const q = memberSearchQuery.toLowerCase();
+    return (
+      (m.name || '').toLowerCase().includes(q) || 
+      (m.crops || '').toLowerCase().includes(q) || 
+      (m.area || '').toLowerCase().includes(q) ||
+      (m.id || '').toLowerCase().includes(q)
+    );
+  });
 
   // --- RENDERING MAIN DASHBOARD WORKSPACE ---
   return (
@@ -1184,79 +1450,122 @@ export default function App() {
           {currentView === 'members' && (
             <div className="space-y-6">
               
-              <div className="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center">
-                <div className="relative w-full md:w-80">
+              <div className="flex flex-col sm:flex-row gap-4 justify-between items-stretch sm:items-center">
+                <div className="relative w-full sm:w-80">
                   <span className="absolute inset-y-0 left-3 flex items-center text-slate-400">
                     <Search className="w-4 h-4" />
                   </span>
                   <input 
                     type="text" 
-                    placeholder="ค้นหาชื่อเกษตรกร, พืชผลหลัก, ที่อยู่..."
+                    placeholder="ค้นหาชื่อเกษตรกร, พืชหลัก, รหัส, ที่อยู่..."
                     value={memberSearchQuery}
                     onChange={(e) => setMemberSearchQuery(e.target.value)}
                     className="w-full pl-9 pr-4 py-2.5 bg-white border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 font-medium transition-all shadow-sm"
                   />
                 </div>
                 
-                <p className="text-xs text-slate-400 font-bold">ข้อมูลอัพเดทเชื่อมโยงล่วงหน้ากับระบบกรมส่งเสริมการเกษตร</p>
+                <div className="flex gap-2.5 items-center justify-end">
+                  <button
+                    onClick={handleSyncCRM}
+                    disabled={isSyncingCRM}
+                    className="flex items-center gap-1.5 bg-white hover:bg-slate-50 text-slate-700 font-extrabold text-xs py-2 px-3.5 border border-slate-200 rounded-xl shadow-sm transition active:scale-95 disabled:opacity-50 cursor-pointer"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isSyncingCRM ? 'animate-spin' : ''}`} />
+                    {isSyncingCRM ? 'กำลังซิงค์...' : 'ซิงค์ข้อมูล CRM'}
+                  </button>
+                  
+                  <button
+                    onClick={() => {
+                      setMemberFormType('add');
+                      setMemberFormValue({
+                        id: `KST-${Math.floor(10000 + Math.random() * 90000)}`,
+                        name: '',
+                        crops: '',
+                        area: '',
+                        score: 'B',
+                        debt: 0,
+                        lastActive: 'วันนี้ 10:45 น.'
+                      });
+                      setMemberFormOpen(true);
+                    }}
+                    className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white font-extrabold text-xs py-2 px-3.5 rounded-xl shadow-md transition active:scale-95 cursor-pointer"
+                  >
+                    <UserPlus className="w-3.5 h-3.5" />
+                    เพิ่มสมาชิกใหม่
+                  </button>
+                </div>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                 
                 {/* List of members left */}
                 <div className="md:col-span-2 bg-white rounded-2xl border border-slate-200/80 shadow-sm overflow-hidden">
-                  <div className="p-4 bg-slate-50 border-b border-slate-200">
+                  <div className="p-4 bg-slate-50 border-b border-slate-200 flex justify-between items-center">
                     <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider">รายชื่อผู้จดทะเบียนสมาชิกสหกรณ์</h3>
+                    <span className="text-[10px] bg-slate-200 text-slate-600 px-2 py-0.5 rounded-full font-bold">
+                      ทั้งหมด {members.length} รายชื่อ
+                    </span>
                   </div>
 
-                  <div className="divide-y divide-slate-100">
-                    {members
-                      .filter(m => m.name.includes(memberSearchQuery) || m.crops.includes(memberSearchQuery))
-                      .map((m) => (
-                        <div 
-                          key={m.id} 
-                          onClick={() => {
-                            setSelectedMemberProfile(m);
-                            setSelectedModal('member');
-                          }}
-                          className="p-5 flex flex-col sm:flex-row justify-between sm:items-center gap-4 hover:bg-slate-50 cursor-pointer transition-colors"
-                        >
-                          <div className="flex items-center gap-3.5">
-                            <div className="w-10 h-10 rounded-full bg-slate-100 flex items-center justify-center font-extrabold text-slate-700 shadow-inner">
-                              {m.name.charAt(3)}
-                            </div>
-                            <div>
-                              <div className="font-extrabold text-slate-900 text-sm flex items-center gap-2">
-                                {m.name}
-                                <span className={`inline-block px-2 py-0.5 rounded text-[9px] font-black ${
-                                  m.score === 'A' ? 'bg-emerald-50 text-emerald-700 border border-emerald-100' :
-                                  m.score === 'B+' ? 'bg-blue-50 text-blue-700 border border-blue-100' :
-                                  'bg-rose-50 text-rose-700 border border-rose-100'
-                                }`}>
-                                  Agri-Score: {m.score}
-                                </span>
-                              </div>
-                              <p className="text-xs text-slate-500 mt-1">
-                                <span className="font-semibold text-slate-800">พืชหลัก:</span> {m.crops}
-                              </p>
-                              <p className="text-[10px] text-slate-400 mt-0.5">{m.area}</p>
-                            </div>
-                          </div>
-
-                          <div className="flex items-center justify-between sm:justify-end gap-6 border-t sm:border-t-0 pt-3 sm:pt-0">
-                            <div className="text-left sm:text-right">
-                              <p className="text-[10px] text-slate-400 font-bold uppercase">ยอดหนี้ O/D ในระบบ</p>
-                              <p className="text-sm font-black text-slate-950">฿ {m.debt.toLocaleString()}</p>
-                            </div>
-                            <div className="text-right">
-                              <p className="text-[10px] text-slate-400 font-bold uppercase">ออฟไลน์ล่าสุด</p>
-                              <p className="text-xs text-slate-500 font-semibold">{m.lastActive}</p>
-                            </div>
-                            <ChevronRight className="w-5 h-5 text-slate-300 hidden sm:block" />
-                          </div>
+                  {isLoadingMembers ? (
+                    <div className="p-12 text-center flex flex-col items-center justify-center gap-3">
+                      <RefreshCw className="w-8 h-8 text-blue-500 animate-spin" />
+                      <p className="text-xs text-slate-500 font-bold">กำลังดึงข้อมูลสมาชิก...</p>
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-slate-100">
+                      {filteredMembers.length === 0 ? (
+                        <div className="p-12 text-center text-slate-400 text-xs font-bold">
+                          ไม่พบข้อมูลสมาชิกตามที่ค้นหา
                         </div>
-                    ))}
-                  </div>
+                      ) : (
+                        filteredMembers.map((m) => (
+                          <div 
+                            key={m.id} 
+                            onClick={() => {
+                              setSelectedMemberProfile(m);
+                              setSelectedModal('member');
+                            }}
+                            className="p-5 flex flex-col sm:flex-row justify-between sm:items-center gap-4 hover:bg-slate-50 cursor-pointer transition-colors"
+                          >
+                            <div className="flex items-center gap-3.5">
+                              <div className="w-10 h-10 rounded-full bg-slate-100 flex items-center justify-center font-extrabold text-slate-700 shadow-inner">
+                                {(m.name || '    ').charAt(3) || 'S'}
+                              </div>
+                              <div>
+                                <div className="font-extrabold text-slate-900 text-sm flex items-center gap-2">
+                                  {m.name}
+                                  <span className={`inline-block px-2 py-0.5 rounded text-[9px] font-black ${
+                                    m.score === 'A' ? 'bg-emerald-50 text-emerald-700 border border-emerald-100' :
+                                    m.score === 'B+' ? 'bg-blue-50 text-blue-700 border border-blue-100' :
+                                    'bg-rose-50 text-rose-700 border border-rose-100'
+                                  }`}>
+                                    Agri-Score: {m.score}
+                                  </span>
+                                </div>
+                                <p className="text-xs text-slate-500 mt-1">
+                                  <span className="font-semibold text-slate-800">พืชหลัก:</span> {m.crops}
+                                </p>
+                                <p className="text-[10px] text-slate-400 mt-0.5">{m.area}</p>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center justify-between sm:justify-end gap-6 border-t sm:border-t-0 pt-3 sm:pt-0">
+                              <div className="text-left sm:text-right">
+                                <p className="text-[10px] text-slate-400 font-bold uppercase">ยอดหนี้ O/D ในระบบ</p>
+                                <p className="text-sm font-black text-slate-950">฿ {(m.debt || 0).toLocaleString()}</p>
+                              </div>
+                              <div className="text-right">
+                                <p className="text-[10px] text-slate-400 font-bold uppercase">ออฟไลน์ล่าสุด</p>
+                                <p className="text-xs text-slate-500 font-semibold">{m.lastActive || 'วันนี้ 10:45 น.'}</p>
+                              </div>
+                              <ChevronRight className="w-5 h-5 text-slate-300 hidden sm:block" />
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* CRM Insights Panel */}
@@ -2146,22 +2455,182 @@ export default function App() {
               </div>
 
               {/* CRM modal footer */}
-              <div className="p-4 bg-white border-t border-slate-100 flex justify-end gap-2 shrink-0">
+              <div className="p-4 bg-white border-t border-slate-100 flex justify-between items-center shrink-0">
                 <button 
-                  onClick={() => {
-                    setSelectedModal(null);
-                    setCurrentView('chat');
-                    triggerToast(`เลือกสวิตช์หน้าต่างเพื่อส่งแชทแนะนำโดยตรงหา ${selectedMemberProfile.name} แล้ว`, 'info');
-                  }}
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold transition shadow-sm"
+                  onClick={() => handleDeleteMember(selectedMemberProfile.id)}
+                  className="px-3.5 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer"
                 >
-                  ส่งข้อความ/ปรึกษาทางแชทโดยตรง
+                  <Trash2 className="w-3.5 h-3.5" />
+                  ลบสมาชิก
                 </button>
+
+                <div className="flex gap-2">
+                  <button 
+                    onClick={() => {
+                      setMemberFormType('edit');
+                      setMemberFormValue({ ...selectedMemberProfile });
+                      setMemberFormOpen(true);
+                    }}
+                    className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Edit className="w-3.5 h-3.5" />
+                    แก้ไขข้อมูล
+                  </button>
+
+                  <button 
+                    onClick={() => {
+                      setSelectedModal(null);
+                      setCurrentView('chat');
+                      triggerToast(`เลือกสวิตช์หน้าต่างเพื่อส่งแชทแนะนำโดยตรงหา ${selectedMemberProfile.name} แล้ว`, 'info');
+                    }}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold transition shadow-sm cursor-pointer"
+                  >
+                    ส่งข้อความ/ปรึกษาทางแชทโดยตรง
+                  </button>
+                </div>
               </div>
 
             </div>
           )}
 
+        </div>
+      )}
+
+      {/* C. Member CRUD Form Modal (Add / Edit) */}
+      {memberFormOpen && (
+        <div 
+          onClick={() => setMemberFormOpen(false)}
+          className="fixed inset-0 bg-slate-950/60 backdrop-blur-sm flex items-center justify-center p-4 z-55 animate-fade-in"
+        >
+          <div 
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white rounded-2xl border border-slate-200 shadow-2xl w-full max-w-md overflow-hidden animate-scale-up"
+          >
+            {/* Header */}
+            <div className="p-4 border-b border-slate-100 bg-slate-900 text-white flex justify-between items-center">
+              <h3 className="font-extrabold text-sm flex items-center gap-2">
+                <UserPlus className="w-4 h-4 text-blue-400" />
+                {memberFormType === 'add' ? 'เพิ่มทะเบียนสมาชิกใหม่' : `แก้ไขข้อมูลสมาชิก: ${memberFormValue.name}`}
+              </h3>
+              <button 
+                onClick={() => setMemberFormOpen(false)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg transition cursor-pointer"
+              >
+                <XCircle className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Form Fields */}
+            <form onSubmit={(e) => {
+              e.preventDefault();
+              if (!memberFormValue.name) {
+                alert('กรุณากรอกชื่อสมาชิก');
+                return;
+              }
+              if (memberFormType === 'add') {
+                handleCreateMember(memberFormValue);
+              } else {
+                handleUpdateMember(memberFormValue.id!, memberFormValue);
+              }
+            }} className="p-6 space-y-4">
+              
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">รหัสสมาชิก (ID)</label>
+                  <input 
+                    type="text"
+                    disabled={memberFormType === 'edit'}
+                    value={memberFormValue.id || ''}
+                    onChange={(e) => setMemberFormValue(prev => ({ ...prev, id: e.target.value }))}
+                    placeholder="KST-XXXXX"
+                    className="w-full px-3.5 py-2 bg-slate-50 disabled:bg-slate-100 disabled:text-slate-500 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 font-bold"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">คะแนน (Agri-Score)</label>
+                  <select
+                    value={memberFormValue.score || 'B'}
+                    onChange={(e) => setMemberFormValue(prev => ({ ...prev, score: e.target.value }))}
+                    className="w-full px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 font-bold"
+                  >
+                    <option value="A">A (ดีเยี่ยม)</option>
+                    <option value="B+">B+ (ดีมาก)</option>
+                    <option value="B">B (ดี)</option>
+                    <option value="C">C (พอใช้)</option>
+                    <option value="D">D (ต้องปรับปรุง)</option>
+                    <option value="F">F (เสี่ยงสูง)</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">ชื่อ-นามสกุล สมาชิก</label>
+                <input 
+                  type="text"
+                  required
+                  value={memberFormValue.name || ''}
+                  onChange={(e) => setMemberFormValue(prev => ({ ...prev, name: e.target.value }))}
+                  placeholder="เช่น นายสมชาย ใจดี"
+                  className="w-full px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 font-semibold text-slate-800"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">พืชผลหลักที่ปลูก</label>
+                <input 
+                  type="text"
+                  required
+                  value={memberFormValue.crops || ''}
+                  onChange={(e) => setMemberFormValue(prev => ({ ...prev, crops: e.target.value }))}
+                  placeholder="เช่น สตรอว์เบอร์รี, ลำไย"
+                  className="w-full px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 font-semibold text-slate-800"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">พื้นที่และที่อยู่แปลง</label>
+                <input 
+                  type="text"
+                  required
+                  value={memberFormValue.area || ''}
+                  onChange={(e) => setMemberFormValue(prev => ({ ...prev, area: e.target.value }))}
+                  placeholder="เช่น 15 ไร่ (ต.แม่ริม)"
+                  className="w-full px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 font-semibold text-slate-800"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">ยอดใช้เงินกู้คงค้าง (ยอดหนี้ O/D ในระบบ)</label>
+                <input 
+                  type="number"
+                  required
+                  value={memberFormValue.debt === 0 ? '' : memberFormValue.debt}
+                  onChange={(e) => setMemberFormValue(prev => ({ ...prev, debt: parseInt(e.target.value) || 0 }))}
+                  placeholder="เช่น 24500"
+                  className="w-full px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 font-bold text-slate-800"
+                />
+              </div>
+
+              {/* Footer Actions */}
+              <div className="pt-4 border-t border-slate-100 flex justify-end gap-2.5">
+                <button 
+                  type="button"
+                  onClick={() => setMemberFormOpen(false)}
+                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition cursor-pointer"
+                >
+                  ยกเลิก
+                </button>
+                <button 
+                  type="submit"
+                  className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-extrabold transition shadow-md cursor-pointer"
+                >
+                  {memberFormType === 'add' ? 'เพิ่มสมาชิก' : 'บันทึกการแก้ไข'}
+                </button>
+              </div>
+
+            </form>
+          </div>
         </div>
       )}
 

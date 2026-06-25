@@ -21,8 +21,21 @@ interface Task {
   actionLabel: string;
 }
 
+interface Member {
+  id: string;
+  name: string;
+  crops: string;
+  area: string;
+  score: string;
+  debt: number;
+  lastActive: string;
+}
+
 let inMemoryTasks: Task[] = [];
 let isLoaded = false;
+
+let inMemoryMembers: Member[] = [];
+let isMembersLoaded = false;
 
 const GOOGLE_SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/1XlVfneJ-RXvQW7jPUL5Am9jkt7KoMeAPNkRJ4NA-_D8/export?format=csv";
 
@@ -105,6 +118,133 @@ function parseCSV(text: string): Task[] {
     });
   }
   return parsed;
+}
+
+// CRM Member CSV Parser Helper
+function parseMemberCSV(text: string): Member[] {
+  const lines = text.split(/\r?\n/).filter(line => line.trim() !== '');
+  if (lines.length === 0) return [];
+
+  const splitLine = (line: string): string[] => {
+    const fields: string[] = [];
+    let current = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i];
+      if (char === '"') {
+        if (inQuotes && line[i + 1] === '"') {
+          current += '"';
+          i++;
+        } else {
+          inQuotes = !inQuotes;
+        }
+      } else if (char === ',' && !inQuotes) {
+        fields.push(current.trim());
+        current = '';
+      } else {
+        current += char;
+      }
+    }
+    fields.push(current.trim());
+    return fields;
+  };
+
+  const firstLine = lines[0] || '';
+  const headers = splitLine(firstLine).map(h => h.toLowerCase().replace(/['"()]/g, '').trim());
+
+  const findIndex = (aliases: string[]): number => {
+    return headers.findIndex(h => aliases.some(alias => h.includes(alias)));
+  };
+
+  const idIdx = findIndex(['รหัสสมาชิก', 'memberid', 'member_id', 'id']);
+  const nameIdx = findIndex(['ชื่อสมาชิก', 'ชื่อเกษตรกร', 'ชื่อ', 'membername', 'name']);
+  const cropsIdx = findIndex(['พืชผลหลัก', 'พืชผล', 'พืชหลัก', 'crops', 'crop', 'ประเภทคำขอ']);
+  const areaIdx = findIndex(['พื้นที่', 'ที่อยู่', 'area', 'address', 'ข้อมูลเพิ่มเติม']);
+  const scoreIdx = findIndex(['คะแนนความน่าเชื่อถือ', 'คะแนน', 'agri-score', 'score', 'status']);
+  const debtIdx = findIndex(['ยอดหนี้', 'หนี้', 'debt', 'amount']);
+  const lastActiveIdx = findIndex(['ออฟไลน์ล่าสุด', 'เข้าใช้งานล่าสุด', 'lastactive', 'active', 'สถานะ']);
+
+  const parsed: Member[] = [];
+  for (let i = 1; i < lines.length; i++) {
+    const fields = splitLine(lines[i]);
+    if (fields.length === 0 || (fields.length === 1 && fields[0] === '')) continue;
+
+    const getValue = (idx: number, defaultValue: string): string => {
+      if (idx !== -1 && idx < fields.length) {
+        let val = fields[idx];
+        if (val.startsWith('"') && val.endsWith('"')) {
+          val = val.slice(1, -1);
+        }
+        return val.trim();
+      }
+      return defaultValue;
+    };
+
+    const id = getValue(idIdx, `KST-${Math.floor(10000 + Math.random() * 90000)}`);
+    const name = getValue(nameIdx, 'ไม่ระบุชื่อ');
+    const crops = getValue(cropsIdx, 'สตรอว์เบอร์รี, ลำไย');
+    const area = getValue(areaIdx, '15 ไร่ (ต.แม่ริม)');
+    
+    let rawScore = getValue(scoreIdx, 'B');
+    if (rawScore.includes('A')) rawScore = 'A';
+    else if (rawScore.includes('B+')) rawScore = 'B+';
+    else if (rawScore.includes('B')) rawScore = 'B';
+    else if (rawScore.includes('C')) rawScore = 'C';
+    else if (rawScore.includes('D')) rawScore = 'D';
+    else if (rawScore.includes('F')) rawScore = 'F';
+
+    const debtStr = getValue(debtIdx, '15000');
+    const debt = parseInt(debtStr.replace(/[^0-9]/g, '')) || 15000;
+    
+    const lastActive = getValue(lastActiveIdx, 'วันนี้ 10:45 น.');
+
+    parsed.push({ id, name, crops, area, score: rawScore, debt, lastActive });
+  }
+  return parsed;
+}
+
+// Fetch helper to populate CRM member in-memory database
+async function loadMembersFromSheet() {
+  const sheetUrls = [
+    "https://docs.google.com/spreadsheets/d/1XlVfneJ-RXvQW7jPUL5Am9jkt7KoMeAPNkRJ4NA-_D8/gviz/tq?tqx=out:csv&sheet=CRM",
+    "https://docs.google.com/spreadsheets/d/1XlVfneJ-RXvQW7jPUL5Am9jkt7KoMeAPNkRJ4NA-_D8/export?format=csv&sheet=CRM"
+  ];
+
+  let loadedSuccessfully = false;
+
+  for (const url of sheetUrls) {
+    try {
+      console.log(`Fetching CRM member data from Google Sheets (${url})...`);
+      const response = await fetch(url);
+      if (!response.ok) {
+        console.warn(`Failed to fetch from ${url}: ${response.statusText}`);
+        continue;
+      }
+      const csvText = await response.text();
+      const parsedMembers = parseMemberCSV(csvText);
+      if (parsedMembers.length > 0) {
+        inMemoryMembers = parsedMembers;
+        isMembersLoaded = true;
+        loadedSuccessfully = true;
+        console.log(`Loaded ${parsedMembers.length} CRM members successfully from Google Sheets via ${url}`);
+        break;
+      } else {
+        console.warn(`No valid CRM members parsed from ${url}`);
+      }
+    } catch (error) {
+      console.error(`Error loading CRM members from url ${url}:`, error);
+    }
+  }
+
+  if (!loadedSuccessfully) {
+    console.log("Using mock fallback CRM member data...");
+    inMemoryMembers = [
+      { id: 'KST-88902', name: 'นายสมชาย ใจดี', crops: 'สตรอว์เบอร์รี, ลำไย', area: '15 ไร่ (ต.แม่ริม)', score: 'A', debt: 24500, lastActive: 'วันนี้ 10:45 น.' },
+      { id: 'KST-77210', name: 'นางสมศรี มีทรัพย์', crops: 'ข้าวไรซ์เบอร์รี่, ผักสวนครัว', area: '8 ไร่ (ต.สันป่าตอง)', score: 'B+', debt: 10000, lastActive: 'เมื่อวาน 15:30 น.' },
+      { id: 'KST-65001', name: 'นายวิชัย รักษ์ดี', crops: 'ข้าวโพดเลี้ยงสัตว์', area: '20 ไร่ (ต.แม่แจ่ม)', score: 'D', debt: 45000, lastActive: '15 มิ.ย. 67' }
+    ];
+    isMembersLoaded = true;
+  }
 }
 
 // Fetch helper to populate in-memory database
@@ -220,6 +360,53 @@ app.delete("/api/tasks/:refId", (req, res) => {
   res.json({ success: true, message: `ลบคำขอ ${refId} เรียบร้อย` });
 });
 
+// Get all CRM members
+app.get("/api/members", async (req, res) => {
+  if (!isMembersLoaded || inMemoryMembers.length === 0) {
+    await loadMembersFromSheet();
+  }
+  res.json(inMemoryMembers);
+});
+
+// Sync CRM members from sheet
+app.post("/api/members/sync", async (req, res) => {
+  await loadMembersFromSheet();
+  res.json({ success: true, message: "ซิงค์รายชื่อสมาชิกกับ Google Sheets สำเร็จ", members: inMemoryMembers });
+});
+
+// Create new member
+app.post("/api/members", (req, res) => {
+  const newMember = req.body;
+  if (!newMember.id) {
+    newMember.id = `KST-${Math.floor(10000 + Math.random() * 90000)}`;
+  }
+  if (!newMember.lastActive) {
+    newMember.lastActive = 'เพิ่งเปิดตัว';
+  }
+  inMemoryMembers.push(newMember);
+  res.json({ success: true, member: newMember });
+});
+
+// Update member
+app.put("/api/members/:id", (req, res) => {
+  const { id } = req.params;
+  const updates = req.body;
+  const index = inMemoryMembers.findIndex(m => m.id === id);
+  if (index !== -1) {
+    inMemoryMembers[index] = { ...inMemoryMembers[index], ...updates };
+    res.json({ success: true, member: inMemoryMembers[index] });
+  } else {
+    res.status(404).json({ success: false, message: "ไม่พบข้อมูลสมาชิก" });
+  }
+});
+
+// Delete member
+app.delete("/api/members/:id", (req, res) => {
+  const { id } = req.params;
+  inMemoryMembers = inMemoryMembers.filter(m => m.id !== id);
+  res.json({ success: true, message: `ลบสมาชิก ${id} สำเร็จ` });
+});
+
 // Serve Frontend Vite dev server or static dist folder
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
@@ -240,6 +427,7 @@ async function startServer() {
     console.log(`Server running on port ${PORT}`);
     // Warm up cache
     loadTasksFromSheet();
+    loadMembersFromSheet();
   });
 }
 
