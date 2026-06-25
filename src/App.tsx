@@ -169,6 +169,107 @@ export default function App() {
     setToast({ show: true, msg, type });
   };
 
+  // --- Client-Side Google Sheets Fallback Loader ---
+  const GOOGLE_SHEET_CSV_URLS = [
+    "https://docs.google.com/spreadsheets/d/1XlVfneJ-RXvQW7jPUL5Am9jkt7KoMeAPNkRJ4NA-_D8/gviz/tq?tqx=out:csv&sheet=Tasks",
+    "https://docs.google.com/spreadsheets/d/1XlVfneJ-RXvQW7jPUL5Am9jkt7KoMeAPNkRJ4NA-_D8/export?format=csv&sheet=Tasks",
+    "https://docs.google.com/spreadsheets/d/1XlVfneJ-RXvQW7jPUL5Am9jkt7KoMeAPNkRJ4NA-_D8/export?format=csv"
+  ];
+
+  const parseClientCSV = (text: string): Task[] => {
+    const lines = text.split(/\r?\n/).filter(line => line.trim() !== '');
+    if (lines.length === 0) return [];
+
+    const splitLine = (line: string): string[] => {
+      const fields: string[] = [];
+      let current = '';
+      let inQuotes = false;
+      for (let i = 0; i < line.length; i++) {
+        const char = line[i];
+        if (char === '"') {
+          if (inQuotes && line[i + 1] === '"') {
+            current += '"';
+            i++;
+          } else {
+            inQuotes = !inQuotes;
+          }
+        } else if (char === ',' && !inQuotes) {
+          fields.push(current.trim());
+          current = '';
+        } else {
+          current += char;
+        }
+      }
+      fields.push(current.trim());
+      return fields;
+    };
+
+    const firstLine = lines[0] || '';
+    const headers = splitLine(firstLine).map(h => h.toLowerCase().replace(/['"()]/g, '').trim());
+    
+    const findIndex = (aliases: string[]): number => {
+      return headers.findIndex(h => aliases.some(alias => h.includes(alias)));
+    };
+
+    const refIdIdx = findIndex(['รหัสอ้างอิง', 'refid', 'id', 'ref']);
+    const typeIdx = findIndex(['ประเภทคำขอ', 'ประเภท', 'type']);
+    const memberIdIdx = findIndex(['รหัสสมาชิก', 'memberid', 'member_id', 'member id']);
+    const memberNameIdx = findIndex(['ชื่อสมาชิก', 'ชื่อ', 'membername', 'name']);
+    const detailsIdx = findIndex(['รายละเอียดคำขอ', 'รายละเอียด', 'details', 'detail']);
+    const additionalInfoIdx = findIndex(['ข้อมูลเพิ่มเติม', 'ข้อมูล', 'additional', 'info', 'additionalinfo']);
+    const statusIdx = findIndex(['สถานะ', 'status']);
+    const scoreIdx = findIndex(['คะแนน', 'score', 'agri-score', 'agriscore']);
+    const actionLabelIdx = findIndex(['การดำเนินการ', 'action', 'actionlabel']);
+
+    const parsed: Task[] = [];
+    for (let i = 1; i < lines.length; i++) {
+      const fields = splitLine(lines[i]);
+      if (fields.length === 0 || (fields.length === 1 && fields[0] === '')) continue;
+
+      const getValue = (idx: number, defaultValue: string): string => {
+        if (idx !== -1 && idx < fields.length) {
+          let val = fields[idx];
+          if (val.startsWith('"') && val.endsWith('"')) {
+            val = val.slice(1, -1);
+          }
+          return val.trim();
+        }
+        return defaultValue;
+      };
+
+      parsed.push({
+        refId: getValue(refIdIdx, `REF-TASK-${Math.floor(1000 + Math.random() * 9000)}`),
+        type: getValue(typeIdx, 'ทั่วไป'),
+        memberId: getValue(memberIdIdx, 'KST-UNKNOWN'),
+        memberName: getValue(memberNameIdx, 'ไม่ระบุชื่อ'),
+        details: getValue(detailsIdx, ''),
+        additionalInfo: getValue(additionalInfoIdx, ''),
+        status: getValue(statusIdx, 'รอตรวจสอบ'),
+        score: getValue(scoreIdx, 'B (เครดิตปกติ)'),
+        actionLabel: getValue(actionLabelIdx, 'ดำเนินการ')
+      });
+    }
+    return parsed;
+  };
+
+  const fetchDirectFromSheets = async (): Promise<Task[]> => {
+    for (const url of GOOGLE_SHEET_CSV_URLS) {
+      try {
+        const response = await fetch(url);
+        if (response.ok) {
+          const text = await response.text();
+          const parsed = parseClientCSV(text);
+          if (parsed.length > 0) {
+            return parsed;
+          }
+        }
+      } catch (e) {
+        console.error("Direct sheet fetch failed:", url, e);
+      }
+    }
+    throw new Error("Could not load from any Google Sheets URL directly");
+  };
+
   // Fetch Tasks on Mount
   const fetchTasks = async () => {
     try {
@@ -177,9 +278,22 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         setTasks(data);
+      } else {
+        console.warn("API load failed, trying direct sheets fetch...");
+        const sheetTasks = await fetchDirectFromSheets();
+        setTasks(sheetTasks);
+        triggerToast("เชื่อมต่อฐานข้อมูลตรงจาก Google Sheets สำเร็จ", "success");
       }
     } catch (err) {
-      console.error("Failed to load tasks from API:", err);
+      console.warn("Failed to load tasks from API, trying direct sheets fetch...", err);
+      try {
+        const sheetTasks = await fetchDirectFromSheets();
+        setTasks(sheetTasks);
+        triggerToast("เชื่อมต่อฐานข้อมูลตรงจาก Google Sheets สำเร็จ", "success");
+      } catch (directErr) {
+        console.error("Both API and direct sheets fetch failed:", directErr);
+        triggerToast("ไม่สามารถโหลดข้อมูลจาก Google Sheets ได้ กรุณาตรวจสอบสิทธิ์การแชร์ลิงก์", "warning");
+      }
     } finally {
       setIsLoadingTasks(false);
     }
@@ -199,10 +313,20 @@ export default function App() {
         setTasks(data.tasks);
         triggerToast(`ซิงค์ข้อมูลจาก Google Sheets เรียบร้อยแล้ว! พบข้อมูลทั้งหมด ${data.tasks.length} รายการ`, 'success');
       } else {
-        triggerToast('ไม่สามารถเชื่อมต่อข้อมูล Google Sheets ได้', 'warning');
+        console.warn("API sync failed, trying direct sheets sync...");
+        const sheetTasks = await fetchDirectFromSheets();
+        setTasks(sheetTasks);
+        triggerToast(`ซิงค์ข้อมูลสดจาก Google Sheets โดยตรงสำเร็จ! พบทั้งหมด ${sheetTasks.length} รายการ`, 'success');
       }
     } catch (err) {
-      triggerToast('เกิดข้อผิดพลาดในการเชื่อมต่อคลาวด์', 'warning');
+      console.warn("API sync error, trying direct sheets sync...", err);
+      try {
+        const sheetTasks = await fetchDirectFromSheets();
+        setTasks(sheetTasks);
+        triggerToast(`ซิงค์ข้อมูลสดจาก Google Sheets โดยตรงสำเร็จ! พบทั้งหมด ${sheetTasks.length} รายการ`, 'success');
+      } catch (directErr) {
+        triggerToast('เกิดข้อผิดพลาดในการเชื่อมต่อคลาวด์และ Google Sheets', 'warning');
+      }
     } finally {
       setIsSyncing(false);
     }
