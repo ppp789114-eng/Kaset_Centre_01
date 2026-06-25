@@ -844,6 +844,26 @@ let db: Firestore | null = null;
 function getFirestoreDb() {
   if (db) return db;
   try {
+    const envProjectId = process.env.VITE_FIREBASE_PROJECT_ID;
+    const envApiKey = process.env.VITE_FIREBASE_API_KEY;
+
+    if (envProjectId && envApiKey) {
+      if (getClientApps().length === 0) {
+        initClientApp({
+          apiKey: envApiKey,
+          authDomain: process.env.VITE_FIREBASE_AUTH_DOMAIN || `${envProjectId}.firebaseapp.com`,
+          projectId: envProjectId,
+          storageBucket: process.env.VITE_FIREBASE_STORAGE_BUCKET || `${envProjectId}.firebasestorage.app`,
+          messagingSenderId: process.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+          appId: process.env.VITE_FIREBASE_APP_ID
+        });
+      }
+      const dbId = process.env.VITE_FIREBASE_DATABASE_ID || undefined;
+      db = dbId ? getClientFirestore(getClientApp(), dbId) : getClientFirestore(getClientApp());
+      console.log("Firebase Client SDK initialized from Env Vars successfully with projectId:", envProjectId, "databaseId:", dbId || "(default)");
+      return db;
+    }
+
     const configPath = path.join(process.cwd(), "firebase-applet-config.json");
     if (fs.existsSync(configPath)) {
       const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
@@ -859,10 +879,10 @@ function getFirestoreDb() {
       }
       const dbId = config.firestoreDatabaseId || "ai-studio-598a3eda-8616-4867-8bb0-08c3aacb2436";
       db = getClientFirestore(getClientApp(), dbId);
-      console.log("Firebase Client SDK initialized successfully with projectId:", config.projectId, "databaseId:", dbId);
+      console.log("Firebase Client SDK initialized from file successfully with projectId:", config.projectId, "databaseId:", dbId);
       return db;
     } else {
-      console.warn("firebase-applet-config.json not found. Firestore cannot be initialized.");
+      console.warn("firebase-applet-config.json and Env Vars not found. Firestore cannot be initialized.");
     }
   } catch (error) {
     console.error("Failed to initialize Firebase Client SDK:", error);
