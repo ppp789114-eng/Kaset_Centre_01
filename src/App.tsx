@@ -28,7 +28,8 @@ import {
   ShieldCheck,
   Building2,
   Calendar,
-  AlertCircle
+  AlertCircle,
+  RefreshCw
 } from 'lucide-react';
 
 // Interfaces for State Management
@@ -102,41 +103,9 @@ export default function App() {
   });
 
   // --- Dynamic Data States ---
-  const [tasks, setTasks] = useState<Task[]>([
-    {
-      refId: 'REF-INS-2401',
-      type: 'เคลมประกันพืชผล',
-      memberId: 'KST-88902',
-      memberName: 'นายสมชาย ใจดี',
-      details: 'แจ้งแปลงสตรอว์เบอร์รีเสียหายจากน้ำท่วม',
-      additionalInfo: 'ดูรูปถ่ายจากระบบ Face ID App',
-      status: 'รอประเมินความเสียหาย',
-      score: 'A (ประวัติดี)',
-      actionLabel: 'ดำเนินการ'
-    },
-    {
-      refId: 'REF-MAC-9921',
-      type: 'เช่าเครื่องจักร',
-      memberId: 'KST-77210',
-      memberName: 'นางสมศรี มีทรัพย์',
-      details: 'จองรถแทรกเตอร์ 4 ชม.',
-      additionalInfo: 'วันที่ใช้: 20 มิ.ย. 67 (หักเงินผ่านบัญชีแล้ว)',
-      status: 'รอจัดสรรคนขับ',
-      score: 'B+ (เครดิตสูง)',
-      actionLabel: 'ดูตารางคิว / อนุมัติคิว'
-    },
-    {
-      refId: 'REF-WEL-1029',
-      type: 'เบิกสวัสดิการ',
-      memberId: 'KST-88902',
-      memberName: 'นายสมชาย ใจดี',
-      details: 'ขอเบิกค่ารักษาพยาบาล 2,500 บาท',
-      additionalInfo: 'ยืนยัน OTP ผ่าน App แล้ว',
-      status: 'รอโอนเงิน',
-      score: 'A (ประวัติดี)',
-      actionLabel: 'สั่งโอนเข้า ธ.ก.ส.'
-    }
-  ]);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [isLoadingTasks, setIsLoadingTasks] = useState<boolean>(true);
+  const [isSyncing, setIsSyncing] = useState<boolean>(false);
 
   const [members] = useState<Member[]>([
     { id: 'KST-88902', name: 'นายสมชาย ใจดี', crops: 'สตรอว์เบอร์รี, ลำไย', area: '15 ไร่ (ต.แม่ริม)', score: 'A', debt: 24500, lastActive: 'วันนี้ 10:45 น.' },
@@ -200,6 +169,45 @@ export default function App() {
     setToast({ show: true, msg, type });
   };
 
+  // Fetch Tasks on Mount
+  const fetchTasks = async () => {
+    try {
+      setIsLoadingTasks(true);
+      const res = await fetch('/api/tasks');
+      if (res.ok) {
+        const data = await res.json();
+        setTasks(data);
+      }
+    } catch (err) {
+      console.error("Failed to load tasks from API:", err);
+    } finally {
+      setIsLoadingTasks(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchTasks();
+  }, []);
+
+  // Sync Database with Sheet
+  const handleSyncDatabase = async () => {
+    try {
+      setIsSyncing(true);
+      const res = await fetch('/api/tasks/sync', { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        setTasks(data.tasks);
+        triggerToast(`ซิงค์ข้อมูลจาก Google Sheets เรียบร้อยแล้ว! พบข้อมูลทั้งหมด ${data.tasks.length} รายการ`, 'success');
+      } else {
+        triggerToast('ไม่สามารถเชื่อมต่อข้อมูล Google Sheets ได้', 'warning');
+      }
+    } catch (err) {
+      triggerToast('เกิดข้อผิดพลาดในการเชื่อมต่อคลาวด์', 'warning');
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
   useEffect(() => {
     if (toast.show) {
       const timer = setTimeout(() => {
@@ -232,9 +240,22 @@ export default function App() {
   };
 
   // Task Actions
-  const handleApproveTask = (refId: string, customMsg?: string) => {
-    triggerToast(customMsg || `ดำเนินการคำขอ ${refId} และส่งแจ้งเตือนสำเร็จแล้ว`, 'success');
-    setTasks(prev => prev.filter(t => t.refId !== refId));
+  const handleApproveTask = async (refId: string, customMsg?: string) => {
+    try {
+      // Call server PUT to set status or DELETE to complete
+      const res = await fetch(`/api/tasks/${refId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'ดำเนินการแล้ว' })
+      });
+      if (res.ok) {
+        triggerToast(customMsg || `ดำเนินการคำขอ ${refId} และบันทึกลงฐานข้อมูลแล้ว`, 'success');
+        // Delete locally so it's completed
+        setTasks(prev => prev.filter(t => t.refId !== refId));
+      }
+    } catch (err) {
+      triggerToast('ไม่สามารถอัปเดตสถานะในเซิร์ฟเวอร์ได้', 'warning');
+    }
   };
 
   // Market QC Actions
@@ -588,6 +609,21 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-4">
+            {/* Sync with Google Sheet Button */}
+            <button
+              onClick={handleSyncDatabase}
+              disabled={isSyncing}
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-[11px] font-bold border transition-all ${
+                isSyncing
+                  ? 'bg-blue-50 border-blue-200 text-blue-500 cursor-not-allowed'
+                  : 'bg-white hover:bg-slate-50 border-slate-200 text-slate-700 active:scale-95 shadow-sm'
+              }`}
+              title="ซิงค์ฐานข้อมูลสดจาก Google Sheets หลังบ้าน"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin text-blue-500' : 'text-slate-500'}`} />
+              <span>{isSyncing ? 'กำลังซิงค์ Google Sheets...' : 'ซิงค์ฐานข้อมูลสด'}</span>
+            </button>
+
             {/* Live Operational Indicator */}
             <div className="flex items-center gap-2 bg-slate-100 border border-slate-200/60 px-3 py-1.5 rounded-full text-[11px] font-bold text-slate-600">
               <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
