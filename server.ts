@@ -857,8 +857,9 @@ function getFirestoreDb() {
           appId: config.appId
         });
       }
-      db = getClientFirestore(getClientApp(), config.firestoreDatabaseId);
-      console.log("Firebase Client SDK initialized successfully with projectId:", config.projectId);
+      const dbId = config.firestoreDatabaseId || "ai-studio-598a3eda-8616-4867-8bb0-08c3aacb2436";
+      db = getClientFirestore(getClientApp(), dbId);
+      console.log("Firebase Client SDK initialized successfully with projectId:", config.projectId, "databaseId:", dbId);
       return db;
     } else {
       console.warn("firebase-applet-config.json not found. Firestore cannot be initialized.");

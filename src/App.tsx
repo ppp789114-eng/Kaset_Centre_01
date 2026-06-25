@@ -42,12 +42,12 @@ import {
 
 // Firebase Client Config for Google Auth
 const firebaseConfig = {
-  projectId: "mythical-ceremony-xwjrd",
-  appId: "1:78807806056:web:495b79ce3487b3c17ecbdd",
-  apiKey: "AIzaSyBXZ2ybTR0i0WjUgMHvoau5M2GrllHM-Q0",
-  authDomain: "mythical-ceremony-xwjrd.firebaseapp.com",
-  storageBucket: "mythical-ceremony-xwjrd.firebasestorage.app",
-  messagingSenderId: "78807806056"
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "mythical-ceremony-xwjrd",
+  appId: import.meta.env.VITE_FIREBASE_APP_ID || "1:78807806056:web:495b79ce3487b3c17ecbdd",
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyBXZ2ybTR0i0WjUgMHvoau5M2GrllHM-Q0",
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "mythical-ceremony-xwjrd.firebaseapp.com",
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "mythical-ceremony-xwjrd.firebasestorage.app",
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "78807806056"
 };
 
 const app = initializeApp(firebaseConfig);
