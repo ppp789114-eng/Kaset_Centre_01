@@ -30,61 +30,118 @@ const GOOGLE_SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/1XlVfneJ-RX
 function parseCSV(text: string): Task[] {
   const lines = text.split(/\r?\n/).filter(line => line.trim() !== '');
   if (lines.length === 0) return [];
-  
-  const parsed: Task[] = [];
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i];
-    const values: string[] = [];
+
+  // Helper to split a CSV line into fields correctly (handling quotes and escaped quotes)
+  const splitLine = (line: string): string[] => {
+    const fields: string[] = [];
     let current = '';
     let inQuotes = false;
-    
-    for (let j = 0; j < line.length; j++) {
-      const char = line[j];
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i];
       if (char === '"') {
-        inQuotes = !inQuotes;
+        // If we see two quotes inside quotes, it's an escaped quote
+        if (inQuotes && line[i + 1] === '"') {
+          current += '"';
+          i++; // Skip next quote
+        } else {
+          inQuotes = !inQuotes;
+        }
       } else if (char === ',' && !inQuotes) {
-        values.push(current.trim());
+        fields.push(current.trim());
         current = '';
       } else {
         current += char;
       }
     }
-    values.push(current.trim());
-    
-    if (values.length >= 7) {
-      parsed.push({
-        refId: values[0] || `REF-TASK-${Math.floor(1000 + Math.random() * 9000)}`,
-        type: values[1] || 'ทั่วไป',
-        memberId: values[2] || 'KST-UNKNOWN',
-        memberName: values[3] || 'ไม่ระบุชื่อ',
-        details: values[4] || '',
-        additionalInfo: values[5] || '',
-        status: values[6] || 'รอตรวจสอบ',
-        score: values[7] || 'B (เครดิตปกติ)',
-        actionLabel: values[8] || 'ดำเนินการ'
-      });
-    }
+    fields.push(current.trim());
+    return fields;
+  };
+
+  const firstLine = lines[0] || '';
+  const headers = splitLine(firstLine).map(h => h.toLowerCase().replace(/['"()]/g, '').trim());
+  
+  // Find column indices based on standard Thai and English headers
+  const findIndex = (aliases: string[]): number => {
+    return headers.findIndex(h => aliases.some(alias => h.includes(alias)));
+  };
+
+  const refIdIdx = findIndex(['รหัสอ้างอิง', 'refid', 'id', 'ref']);
+  const typeIdx = findIndex(['ประเภทคำขอ', 'ประเภท', 'type']);
+  const memberIdIdx = findIndex(['รหัสสมาชิก', 'memberid', 'member_id', 'member id']);
+  const memberNameIdx = findIndex(['ชื่อสมาชิก', 'ชื่อ', 'membername', 'name']);
+  const detailsIdx = findIndex(['รายละเอียดคำขอ', 'รายละเอียด', 'details', 'detail']);
+  const additionalInfoIdx = findIndex(['ข้อมูลเพิ่มเติม', 'ข้อมูล', 'additional', 'info', 'additionalinfo']);
+  const statusIdx = findIndex(['สถานะ', 'status']);
+  const scoreIdx = findIndex(['คะแนน', 'score', 'agri-score', 'agriscore']);
+  const actionLabelIdx = findIndex(['การดำเนินการ', 'action', 'actionlabel']);
+
+  const parsed: Task[] = [];
+  for (let i = 1; i < lines.length; i++) {
+    const fields = splitLine(lines[i]);
+    if (fields.length === 0 || (fields.length === 1 && fields[0] === '')) continue;
+
+    const getValue = (idx: number, defaultValue: string): string => {
+      if (idx !== -1 && idx < fields.length) {
+        let val = fields[idx];
+        // Strip surrounding quotes if any
+        if (val.startsWith('"') && val.endsWith('"')) {
+          val = val.slice(1, -1);
+        }
+        return val.trim();
+      }
+      return defaultValue;
+    };
+
+    parsed.push({
+      refId: getValue(refIdIdx, `REF-TASK-${Math.floor(1000 + Math.random() * 9000)}`),
+      type: getValue(typeIdx, 'ทั่วไป'),
+      memberId: getValue(memberIdIdx, 'KST-UNKNOWN'),
+      memberName: getValue(memberNameIdx, 'ไม่ระบุชื่อ'),
+      details: getValue(detailsIdx, ''),
+      additionalInfo: getValue(additionalInfoIdx, ''),
+      status: getValue(statusIdx, 'รอตรวจสอบ'),
+      score: getValue(scoreIdx, 'B (เครดิตปกติ)'),
+      actionLabel: getValue(actionLabelIdx, 'ดำเนินการ')
+    });
   }
   return parsed;
 }
 
 // Fetch helper to populate in-memory database
 async function loadTasksFromSheet() {
-  try {
-    console.log("Fetching latest task data from Google Sheets...");
-    const response = await fetch(GOOGLE_SHEET_CSV_URL);
-    if (!response.ok) {
-      throw new Error(`Failed to fetch Google Sheets CSV: ${response.statusText}`);
+  const sheetUrls = [
+    "https://docs.google.com/spreadsheets/d/1XlVfneJ-RXvQW7jPUL5Am9jkt7KoMeAPNkRJ4NA-_D8/export?format=csv&sheet=Tasks",
+    "https://docs.google.com/spreadsheets/d/1XlVfneJ-RXvQW7jPUL5Am9jkt7KoMeAPNkRJ4NA-_D8/export?format=csv"
+  ];
+
+  let loadedSuccessfully = false;
+
+  for (const url of sheetUrls) {
+    try {
+      console.log(`Fetching latest task data from Google Sheets (${url})...`);
+      const response = await fetch(url);
+      if (!response.ok) {
+        console.warn(`Failed to fetch from ${url}: ${response.statusText}`);
+        continue;
+      }
+      const csvText = await response.text();
+      const tasks = parseCSV(csvText);
+      if (tasks.length > 0) {
+        inMemoryTasks = tasks;
+        isLoaded = true;
+        loadedSuccessfully = true;
+        console.log(`Loaded ${tasks.length} tasks successfully from Google Sheets via ${url}`);
+        break; // Stop trying URLs if we succeeded
+      } else {
+        console.warn(`No valid tasks parsed from ${url}`);
+      }
+    } catch (error) {
+      console.error(`Error loading tasks from url ${url}:`, error);
     }
-    const csvText = await response.text();
-    const tasks = parseCSV(csvText);
-    if (tasks.length > 0) {
-      inMemoryTasks = tasks;
-      isLoaded = true;
-      console.log(`Loaded ${tasks.length} tasks successfully from Google Sheets.`);
-    }
-  } catch (error) {
-    console.error("Error loading tasks from sheet, using mock fallback:", error);
+  }
+
+  if (!loadedSuccessfully) {
+    console.log("Using mock fallback data...");
     // Fallback if network or fetch fails
     inMemoryTasks = [
       {
