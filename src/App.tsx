@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInWithPopup, GoogleAuthProvider, User as FirebaseUser } from 'firebase/auth';
+import { getFirestore, collection, getDocs, doc, setDoc, addDoc, deleteDoc } from 'firebase/firestore';
 import { 
   LayoutDashboard, 
   Inbox, 
@@ -52,6 +53,12 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
+
+// Initialize client-side Firestore based on configured project ID
+const isDefaultProject = (import.meta.env.VITE_FIREBASE_PROJECT_ID || "mythical-ceremony-xwjrd") === "mythical-ceremony-xwjrd";
+const dbId = import.meta.env.VITE_FIREBASE_DATABASE_ID || (isDefaultProject ? "ai-studio-598a3eda-8616-4867-8bb0-08c3aacb2436" : undefined);
+const clientDb = dbId ? getFirestore(app, dbId) : getFirestore(app);
+
 const provider = new GoogleAuthProvider();
 provider.addScope('https://www.googleapis.com/auth/spreadsheets');
 
@@ -329,6 +336,34 @@ export default function App() {
   const fetchMembers = async () => {
     try {
       setIsLoadingMembers(true);
+
+      // Try client-side Firestore first so it works everywhere (including Vercel with user's own config!)
+      if (clientDb) {
+        try {
+          const collectionRef = collection(clientDb, "CRM");
+          const snapshot = await getDocs(collectionRef);
+          if (!snapshot.empty) {
+            const membersList: Member[] = [];
+            snapshot.forEach(docSnap => {
+              const data = docSnap.data();
+              membersList.push({
+                id: docSnap.id,
+                name: data.name || data['ชื่อ-นามสกุล'] || data['ชื่อ'] || '',
+                crops: data.crops || data['พืชหลัก'] || data['พืชผลหลัก'] || '',
+                area: data.area || data['พื้นที่เพาะปลูก'] || data['พื้นที่'] || '',
+                score: data.score || data['เกรดเกษตรกร'] || 'B',
+                debt: Number(data.debt) || Number(data['ยอดหนี้ OD']) || 0,
+                lastActive: data.lastActive || data['ออฟไลน์ล่าสุด'] || 'วันนี้ 10:45 น.',
+              });
+            });
+            setMembers(membersList);
+            return; // Success!
+          }
+        } catch (dbErr) {
+          console.warn("Failed to fetch CRM from client-side Firestore, falling back to API...", dbErr);
+        }
+      }
+
       const res = await fetch('/api/members');
       if (res.ok) {
         const data = await res.json();
@@ -569,6 +604,37 @@ export default function App() {
   const fetchTasks = async () => {
     try {
       setIsLoadingTasks(true);
+
+      // Try client-side Firestore first so it works everywhere (including Vercel with user's own config!)
+      if (clientDb) {
+        try {
+          const collectionRef = collection(clientDb, "Tasks");
+          const snapshot = await getDocs(collectionRef);
+          if (!snapshot.empty) {
+            const tasksList: any[] = [];
+            snapshot.forEach(docSnap => {
+              const data = docSnap.data();
+              tasksList.push({
+                refId: docSnap.id,
+                type: data.type || '',
+                memberId: data.memberId || '',
+                memberName: data.memberName || '',
+                details: data.details || '',
+                additionalInfo: data.additionalInfo || '',
+                status: data.status || 'รอดำเนินการ',
+                score: data.score || 'B',
+                actionLabel: data.actionLabel || 'ดำเนินการ',
+                ...data
+              });
+            });
+            setTasks(tasksList);
+            return; // Success!
+          }
+        } catch (dbErr) {
+          console.warn("Failed to fetch Tasks from client-side Firestore, falling back to API...", dbErr);
+        }
+      }
+
       const res = await fetch('/api/tasks');
       if (res.ok) {
         const data = await res.json();
@@ -654,6 +720,74 @@ export default function App() {
     }
   };
 
+  // Helpers for direct client-side Google Sheet parsing and import
+  const buildClientSheetExportUrl = (inputUrl: string, sheetName: string): string => {
+    const match = inputUrl.match(/\/d\/([a-zA-Z0-9-_]+)/);
+    if (!match) {
+      throw new Error("รูปแบบลิงก์ Google Sheets ไม่ถูกต้อง");
+    }
+    const spreadsheetId = match[1];
+    return `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=csv&sheet=${encodeURIComponent(sheetName)}`;
+  };
+
+  const parseGenericCSV = (text: string): Record<string, any>[] => {
+    const lines = text.split(/\r?\n/).filter(line => line.trim() !== '');
+    if (lines.length === 0) return [];
+
+    const splitLine = (line: string): string[] => {
+      const fields: string[] = [];
+      let current = '';
+      let inQuotes = false;
+      for (let i = 0; i < line.length; i++) {
+        const char = line[i];
+        if (char === '"') {
+          if (inQuotes && line[i + 1] === '"') {
+            current += '"';
+            i++;
+          } else {
+            inQuotes = !inQuotes;
+          }
+        } else if (char === ',' && !inQuotes) {
+          fields.push(current.trim());
+          current = '';
+        } else {
+          current += char;
+        }
+      }
+      fields.push(current.trim());
+      return fields;
+    };
+
+    const headers = splitLine(lines[0] || '').map(h => {
+      return h.replace(/['"()]/g, '').trim();
+    });
+
+    const parsed: Record<string, any>[] = [];
+    for (let i = 1; i < lines.length; i++) {
+      const fields = splitLine(lines[i]);
+      if (fields.length === 0 || (fields.length === 1 && fields[0] === '')) continue;
+
+      const rowObj: Record<string, any> = {};
+      headers.forEach((header, index) => {
+        if (!header) return;
+        let val = fields[index] !== undefined ? fields[index] : '';
+        if (val.startsWith('"') && val.endsWith('"')) {
+          val = val.slice(1, -1);
+        }
+        
+        const trimmedVal = val.trim();
+        const numVal = Number(trimmedVal);
+        if (trimmedVal !== '' && !isNaN(numVal)) {
+          rowObj[header] = numVal;
+        } else {
+          rowObj[header] = trimmedVal;
+        }
+      });
+      parsed.push(rowObj);
+    }
+    return parsed;
+  };
+
   // Import Sheet to Firestore Handler
   const handleImportSheet = async () => {
     if (!importSheetUrl || !importSheetName) {
@@ -674,8 +808,12 @@ export default function App() {
         })
       });
 
+      if (!res.ok) {
+        throw new Error(`เซิร์ฟเวอร์ตอบกลับรหัสข้อผิดพลาด ${res.status}`);
+      }
+
       const data = await res.json();
-      if (res.ok && data.success) {
+      if (data.success) {
         setImportResult({
           success: true,
           message: data.message,
@@ -691,19 +829,93 @@ export default function App() {
           fetchTasks();
         }
       } else {
-        setImportResult({
-          success: false,
-          message: data.message || 'เกิดข้อผิดพลาดในการนำเข้าข้อมูล'
-        });
-        triggerToast(data.message || 'เกิดข้อผิดพลาดในการนำเข้า', 'warning');
+        throw new Error(data.message || 'เกิดข้อผิดพลาดจากเซิร์ฟเวอร์');
       }
     } catch (err: any) {
-      console.error(err);
-      setImportResult({
-        success: false,
-        message: err.message || 'ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้'
-      });
-      triggerToast('ล้มเหลวในการส่งข้อมูลนำเข้า', 'warning');
+      console.warn("API import failed, falling back to direct browser-to-Firestore import...", err);
+      try {
+        if (!clientDb) {
+          throw new Error("ไม่มีการเชื่อมต่อ Firestore ในหน้าเว็บ กรุณากรอก Environment Variables");
+        }
+        
+        // Fetch CSV directly in browser
+        const exportUrl = buildClientSheetExportUrl(importSheetUrl, importSheetName);
+        const csvResponse = await fetch(exportUrl);
+        if (!csvResponse.ok) {
+          throw new Error(`ไม่สามารถดึงข้อมูลแผ่นงานได้ (${csvResponse.statusText})`);
+        }
+        const csvText = await csvResponse.text();
+        const parsedRows = parseGenericCSV(csvText);
+
+        if (parsedRows.length === 0) {
+          setImportResult({
+            success: true,
+            message: `ไม่พบข้อมูลในชีท "${importSheetName}" หรือเป็นชีทว่าง`,
+            count: 0,
+            preview: []
+          });
+          return;
+        }
+
+        const collectionName = importSheetName.trim();
+        let successCount = 0;
+        const docIdFields = ['รหัสสมาชิก', 'memberid', 'member_id', 'id', 'refid', 'ref_id', 'รหัส'];
+
+        // Write to Firestore directly via client-side SDK
+        for (const rowObj of parsedRows) {
+          let docId: string | null = null;
+          for (const key of Object.keys(rowObj)) {
+            const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+            if (docIdFields.some(f => f.toLowerCase().replace(/[^a-z0-9]/g, '') === normalizedKey)) {
+              if (rowObj[key]) {
+                docId = String(rowObj[key]).trim();
+              }
+              break;
+            }
+          }
+
+          try {
+            if (docId) {
+              const docRef = doc(clientDb, collectionName, docId);
+              await setDoc(docRef, {
+                ...rowObj,
+                importedAt: new Date().toISOString()
+              });
+            } else {
+              const collectionRef = collection(clientDb, collectionName);
+              await addDoc(collectionRef, {
+                ...rowObj,
+                importedAt: new Date().toISOString()
+              });
+            }
+            successCount++;
+          } catch (writeErr) {
+            console.error("Direct Firestore write failed for row:", writeErr, rowObj);
+          }
+        }
+
+        setImportResult({
+          success: true,
+          message: `นำเข้าข้อมูลตรงผ่านเบราว์เซอร์สำเร็จ! (เชื่อมต่อกับ Firestore ในโปรเจกต์ของคุณแล้ว)`,
+          count: successCount,
+          total: parsedRows.length,
+          preview: parsedRows.slice(0, 5)
+        });
+        triggerToast(`นำเข้าสำเร็จตรงสู่ Firestore! บันทึกแล้ว ${successCount} แถว`, 'success');
+
+        if (importSheetName.toUpperCase() === 'CRM') {
+          fetchMembers();
+        } else if (importSheetName.toUpperCase() === 'TASKS') {
+          fetchTasks();
+        }
+      } catch (directErr: any) {
+        console.error("Direct browser-to-Firestore import failed:", directErr);
+        setImportResult({
+          success: false,
+          message: directErr.message || 'เกิดข้อผิดพลาดขณะเขียนข้อมูลลงฐานข้อมูลโดยตรง'
+        });
+        triggerToast('เกิดข้อผิดพลาดในการประมวลผล', 'warning');
+      }
     } finally {
       setIsImporting(false);
     }
