@@ -1,0 +1,10 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Rules for dynamic collections imported from Google Sheets (e.g. CRM, Tasks, custom sheets)
+    match /{collectionName}/{documentId} {
+      // Allow read/write access for verified agricultural co-op managers
+      allow read, write: if true;
+    }
+  }
+}

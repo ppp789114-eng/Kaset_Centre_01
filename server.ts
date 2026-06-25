@@ -1,6 +1,9 @@
 import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
+import { initializeApp, getApps, getApp } from "firebase-admin/app";
+import { getFirestore, Firestore } from "firebase-admin/firestore";
+import fs from "fs";
 
 const app = express();
 const PORT = 3000;
@@ -405,6 +408,188 @@ app.delete("/api/members/:id", (req, res) => {
   const { id } = req.params;
   inMemoryMembers = inMemoryMembers.filter(m => m.id !== id);
   res.json({ success: true, message: `ลบสมาชิก ${id} สำเร็จ` });
+});
+
+// --- FIRESTORE INTEGRATION & IMPORT ENDPOINTS ---
+
+let db: Firestore | null = null;
+
+function getFirestoreDb() {
+  if (db) return db;
+  try {
+    const configPath = path.join(process.cwd(), "firebase-applet-config.json");
+    if (fs.existsSync(configPath)) {
+      const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+      if (getApps().length === 0) {
+        initializeApp({
+          projectId: config.projectId,
+        });
+      }
+      db = getFirestore(getApp(), config.firestoreDatabaseId);
+      console.log("Firebase Admin initialized successfully with projectId:", config.projectId);
+      return db;
+    } else {
+      console.warn("firebase-applet-config.json not found. Firestore cannot be initialized.");
+    }
+  } catch (error) {
+    console.error("Failed to initialize Firebase Admin:", error);
+  }
+  return null;
+}
+
+function buildSheetExportUrl(inputUrl: string, sheetName: string): string {
+  const match = inputUrl.match(/\/d\/([a-zA-Z0-9-_]+)/);
+  if (!match) {
+    throw new Error("รูปแบบลิงก์ Google Sheets ไม่ถูกต้อง");
+  }
+  const spreadsheetId = match[1];
+  return `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=csv&sheet=${encodeURIComponent(sheetName)}`;
+}
+
+function parseGenericCSV(text: string): Record<string, any>[] {
+  const lines = text.split(/\r?\n/).filter(line => line.trim() !== '');
+  if (lines.length === 0) return [];
+
+  const splitLine = (line: string): string[] => {
+    const fields: string[] = [];
+    let current = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i];
+      if (char === '"') {
+        if (inQuotes && line[i + 1] === '"') {
+          current += '"';
+          i++;
+        } else {
+          inQuotes = !inQuotes;
+        }
+      } else if (char === ',' && !inQuotes) {
+        fields.push(current.trim());
+        current = '';
+      } else {
+        current += char;
+      }
+    }
+    fields.push(current.trim());
+    return fields;
+  };
+
+  const headers = splitLine(lines[0] || '').map(h => {
+    return h.replace(/['"()]/g, '').trim();
+  });
+
+  const parsed: Record<string, any>[] = [];
+  for (let i = 1; i < lines.length; i++) {
+    const fields = splitLine(lines[i]);
+    if (fields.length === 0 || (fields.length === 1 && fields[0] === '')) continue;
+
+    const rowObj: Record<string, any> = {};
+    headers.forEach((header, index) => {
+      if (!header) return;
+      let val = fields[index] !== undefined ? fields[index] : '';
+      if (val.startsWith('"') && val.endsWith('"')) {
+        val = val.slice(1, -1);
+      }
+      
+      const trimmedVal = val.trim();
+      const numVal = Number(trimmedVal);
+      if (trimmedVal !== '' && !isNaN(numVal)) {
+        rowObj[header] = numVal;
+      } else {
+        rowObj[header] = trimmedVal;
+      }
+    });
+    parsed.push(rowObj);
+  }
+  return parsed;
+}
+
+// Convert Sheet to Firestore Collection API
+app.post("/api/import-sheet", async (req, res) => {
+  const { sheetUrl, sheetName } = req.body;
+  if (!sheetUrl || !sheetName) {
+    return res.status(400).json({ success: false, message: "กรุณาระบุลิงก์ Google Sheet และชื่อชีท" });
+  }
+
+  try {
+    const firestoreDb = getFirestoreDb();
+    if (!firestoreDb) {
+      return res.status(500).json({ 
+        success: false, 
+        message: "ไม่สามารถเชื่อมต่อฐานข้อมูล Firestore ได้ กรุณาตรวจสอบว่ามี firebase-applet-config.json และเปิดบริการแล้ว" 
+      });
+    }
+
+    const exportUrl = buildSheetExportUrl(sheetUrl, sheetName);
+    console.log(`Fetching sheet data for import from: ${exportUrl}`);
+
+    const response = await fetch(exportUrl);
+    if (!response.ok) {
+      throw new Error(`ไม่สามารถดึงข้อมูลจาก Google Sheet ได้ (${response.statusText})`);
+    }
+
+    const csvText = await response.text();
+    const parsedRows = parseGenericCSV(csvText);
+
+    if (parsedRows.length === 0) {
+      return res.json({ 
+        success: true, 
+        message: `ไม่พบข้อมูลในชีท "${sheetName}" หรือเป็นชีทว่าง`, 
+        count: 0, 
+        preview: [] 
+      });
+    }
+
+    const collectionName = sheetName.trim();
+    const collectionRef = firestoreDb.collection(collectionName);
+
+    let successCount = 0;
+    const docIdFields = ['รหัสสมาชิก', 'memberid', 'member_id', 'id', 'refid', 'ref_id', 'รหัส'];
+
+    const writePromises = parsedRows.map(async (rowObj) => {
+      let docId: string | null = null;
+      for (const key of Object.keys(rowObj)) {
+        const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (docIdFields.some(f => f.toLowerCase().replace(/[^a-z0-9]/g, '') === normalizedKey)) {
+          if (rowObj[key]) {
+            docId = String(rowObj[key]).trim();
+          }
+          break;
+        }
+      }
+
+      try {
+        if (docId) {
+          await collectionRef.doc(docId).set({
+            ...rowObj,
+            importedAt: new Date().toISOString()
+          });
+        } else {
+          await collectionRef.add({
+            ...rowObj,
+            importedAt: new Date().toISOString()
+          });
+        }
+        successCount++;
+      } catch (err) {
+        console.error(`Failed to write row to Firestore:`, err, rowObj);
+      }
+    });
+
+    await Promise.all(writePromises);
+
+    res.json({
+      success: true,
+      message: `นำเข้าข้อมูลไปยังคอลเลกชัน "${collectionName}" ใน Firestore สำเร็จ!`,
+      count: successCount,
+      total: parsedRows.length,
+      preview: parsedRows.slice(0, 5)
+    });
+
+  } catch (error: any) {
+    console.error("Error during sheet import to Firestore:", error);
+    res.status(500).json({ success: false, message: error.message || "เกิดข้อผิดพลาดในการนำเข้าข้อมูล" });
+  }
 });
 
 // Serve Frontend Vite dev server or static dist folder

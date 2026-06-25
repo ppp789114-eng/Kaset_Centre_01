@@ -33,7 +33,9 @@ import {
   Plus,
   Edit,
   Trash2,
-  UserPlus
+  UserPlus,
+  Database,
+  CloudUpload
 } from 'lucide-react';
 
 // Interfaces for State Management
@@ -168,6 +170,18 @@ export default function App() {
 
   const [currentChatInput, setCurrentChatInput] = useState<string>('');
   
+  // --- Google Sheet to Firestore Import States ---
+  const [importSheetUrl, setImportSheetUrl] = useState<string>('https://docs.google.com/spreadsheets/d/1XlVfneJ-RXvQW7jPUL5Am9jkt7KoMeAPNkRJ4NA-_D8');
+  const [importSheetName, setImportSheetName] = useState<string>('CRM');
+  const [isImporting, setIsImporting] = useState<boolean>(false);
+  const [importResult, setImportResult] = useState<{
+    success: boolean;
+    message: string;
+    count?: number;
+    total?: number;
+    preview?: any[];
+  } | null>(null);
+
   // --- Filter states ---
   const [taskSearchQuery, setTaskSearchQuery] = useState<string>('');
   const [memberSearchQuery, setMemberSearchQuery] = useState<string>('');
@@ -553,6 +567,32 @@ export default function App() {
     }
   };
 
+  // Synchronize view state with window location path (supports /import)
+  useEffect(() => {
+    const handleLocationChange = () => {
+      if (window.location.pathname === '/import') {
+        setCurrentView('import');
+      } else {
+        // Only override if we're on root path to preserve normal component views
+        if (window.location.pathname === '/' || window.location.pathname === '') {
+          setCurrentView('dashboard');
+        }
+      }
+    };
+    handleLocationChange();
+    window.addEventListener('popstate', handleLocationChange);
+    return () => window.removeEventListener('popstate', handleLocationChange);
+  }, []);
+
+  const navigateToView = (view: string) => {
+    setCurrentView(view);
+    if (view === 'import') {
+      window.history.pushState({}, '', '/import');
+    } else {
+      window.history.pushState({}, '', '/');
+    }
+  };
+
   useEffect(() => {
     fetchTasks();
     fetchMembers();
@@ -584,6 +624,61 @@ export default function App() {
       }
     } finally {
       setIsSyncing(false);
+    }
+  };
+
+  // Import Sheet to Firestore Handler
+  const handleImportSheet = async () => {
+    if (!importSheetUrl || !importSheetName) {
+      triggerToast('กรุณาระบุลิงก์ Google Sheets และชื่อแผ่นงาน', 'warning');
+      return;
+    }
+    try {
+      setIsImporting(true);
+      setImportResult(null);
+      const res = await fetch('/api/import-sheet', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          sheetUrl: importSheetUrl,
+          sheetName: importSheetName
+        })
+      });
+
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setImportResult({
+          success: true,
+          message: data.message,
+          count: data.count,
+          total: data.total,
+          preview: data.preview
+        });
+        triggerToast(`นำเข้าสำเร็จ! บันทึกแล้ว ${data.count} แถวลง Firestore`, 'success');
+        // Reload local app state if sheet matches
+        if (importSheetName.toUpperCase() === 'CRM') {
+          fetchMembers();
+        } else if (importSheetName.toUpperCase() === 'TASKS') {
+          fetchTasks();
+        }
+      } else {
+        setImportResult({
+          success: false,
+          message: data.message || 'เกิดข้อผิดพลาดในการนำเข้าข้อมูล'
+        });
+        triggerToast(data.message || 'เกิดข้อผิดพลาดในการนำเข้า', 'warning');
+      }
+    } catch (err: any) {
+      console.error(err);
+      setImportResult({
+        success: false,
+        message: err.message || 'ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้'
+      });
+      triggerToast('ล้มเหลวในการส่งข้อมูลนำเข้า', 'warning');
+    } finally {
+      setIsImporting(false);
     }
   };
 
@@ -858,7 +953,7 @@ export default function App() {
             <p className="text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-2 px-3">เมนูควบคุมหลัก</p>
             <nav className="space-y-1">
               <button 
-                onClick={() => { setCurrentView('dashboard'); }} 
+                onClick={() => { navigateToView('dashboard'); }} 
                 className={`w-full flex items-center justify-between px-3 py-2.5 text-xs rounded-xl transition-all ${
                   currentView === 'dashboard' ? 'bg-blue-600 text-white font-bold shadow-md shadow-blue-600/10' : 'hover:bg-slate-900 hover:text-white'
                 }`}
@@ -870,7 +965,7 @@ export default function App() {
               </button>
 
               <button 
-                onClick={() => { setCurrentView('tasks'); }} 
+                onClick={() => { navigateToView('tasks'); }} 
                 className={`w-full flex items-center justify-between px-3 py-2.5 text-xs rounded-xl transition-all ${
                   currentView === 'tasks' ? 'bg-blue-600 text-white font-bold shadow-md shadow-blue-600/10' : 'hover:bg-slate-900 hover:text-white'
                 }`}
@@ -887,7 +982,7 @@ export default function App() {
               </button>
 
               <button 
-                onClick={() => { setCurrentView('members'); }} 
+                onClick={() => { navigateToView('members'); }} 
                 className={`w-full flex items-center justify-between px-3 py-2.5 text-xs rounded-xl transition-all ${
                   currentView === 'members' ? 'bg-blue-600 text-white font-bold shadow-md shadow-blue-600/10' : 'hover:bg-slate-900 hover:text-white'
                 }`}
@@ -899,7 +994,7 @@ export default function App() {
               </button>
 
               <button 
-                onClick={() => { setCurrentView('market'); }} 
+                onClick={() => { navigateToView('market'); }} 
                 className={`w-full flex items-center justify-between px-3 py-2.5 text-xs rounded-xl transition-all ${
                   currentView === 'market' ? 'bg-blue-600 text-white font-bold shadow-md shadow-blue-600/10' : 'hover:bg-slate-900 hover:text-white'
                 }`}
@@ -921,7 +1016,7 @@ export default function App() {
             <p className="text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-2 px-3">ปฏิบัติการเฉพาะทาง</p>
             <nav className="space-y-1">
               <button 
-                onClick={() => { setCurrentView('finance'); }} 
+                onClick={() => { navigateToView('finance'); }} 
                 className={`w-full flex items-center justify-between px-3 py-2.5 text-xs rounded-xl transition-all ${
                   currentView === 'finance' ? 'bg-blue-600 text-white font-bold shadow-md shadow-blue-600/10' : 'hover:bg-slate-900 hover:text-white'
                 }`}
@@ -933,7 +1028,7 @@ export default function App() {
               </button>
 
               <button 
-                onClick={() => { setCurrentView('machine'); }} 
+                onClick={() => { navigateToView('machine'); }} 
                 className={`w-full flex items-center justify-between px-3 py-2.5 text-xs rounded-xl transition-all ${
                   currentView === 'machine' ? 'bg-blue-600 text-white font-bold shadow-md shadow-blue-600/10' : 'hover:bg-slate-900 hover:text-white'
                 }`}
@@ -945,7 +1040,7 @@ export default function App() {
               </button>
 
               <button 
-                onClick={() => { setCurrentView('chat'); }} 
+                onClick={() => { navigateToView('chat'); }} 
                 className={`w-full flex items-center justify-between px-3 py-2.5 text-xs rounded-xl transition-all ${
                   currentView === 'chat' ? 'bg-blue-600 text-white font-bold shadow-md shadow-blue-600/10' : 'hover:bg-slate-900 hover:text-white'
                 }`}
@@ -955,6 +1050,23 @@ export default function App() {
                   <span>AI Helpdesk (ห้องแชท)</span>
                 </div>
                 <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+              </button>
+            </nav>
+          </div>
+
+          <div>
+            <p className="text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-2 px-3">ระบบคลาวด์และฐานข้อมูล</p>
+            <nav className="space-y-1">
+              <button 
+                onClick={() => { navigateToView('import'); }} 
+                className={`w-full flex items-center justify-between px-3 py-2.5 text-xs rounded-xl transition-all ${
+                  currentView === 'import' ? 'bg-blue-600 text-white font-bold shadow-md shadow-blue-600/10' : 'hover:bg-slate-900 hover:text-white'
+                }`}
+              >
+                <div className="flex items-center gap-2.5">
+                  <CloudUpload className="w-4 h-4 shrink-0 text-blue-400" />
+                  <span>แปลง Sheet ไป Firestore (/import)</span>
+                </div>
               </button>
             </nav>
           </div>
@@ -2262,6 +2374,204 @@ export default function App() {
                       <Send className="w-4 h-4" />
                     </button>
                   </form>
+                </div>
+
+              </div>
+
+            </div>
+          )}
+
+          {/* D. Google Sheet to Firestore Importer View */}
+          {currentView === 'import' && (
+            <div className="space-y-6">
+              
+              {/* Top Banner */}
+              <div className="bg-gradient-to-r from-blue-900 via-slate-900 to-slate-950 text-white rounded-3xl p-6 shadow-xl relative overflow-hidden border border-slate-800">
+                <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
+                  <div>
+                    <span className="bg-blue-500/20 text-blue-300 text-[10px] font-black uppercase tracking-widest px-3 py-1 rounded-full border border-blue-500/30">
+                      ☁️ Firestore Cloud Synchronization Engine
+                    </span>
+                    <h2 className="text-xl md:text-2xl font-black tracking-tight mt-3">
+                      ระบบแปลงแผ่นงาน Google Sheets ไปเป็น Firestore Collections
+                    </h2>
+                    <p className="text-xs text-slate-300 mt-2 max-w-2xl leading-relaxed font-medium">
+                      เชื่อมต่อฐานข้อมูล NoSQL และซิงค์ข้อมูลเกษตรกร คำขอ และข้อมูลแชร์ริ่งเครื่องจักรจาก Google Sheets 
+                      แปลงเป็น JSON Documents และส่งขึ้น Firestore ได้ทันทีโดยใช้ชื่อชีทเป็นชื่อคอลเลกชัน
+                    </p>
+                  </div>
+                  <Database className="w-16 h-16 text-blue-500/30 absolute right-6 bottom-0 hidden md:block shrink-0" />
+                </div>
+              </div>
+
+              {/* Grid Form and Rules */}
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                
+                {/* Form configuration panel */}
+                <div className="lg:col-span-5 bg-white border border-slate-200 rounded-3xl p-6 shadow-sm space-y-5">
+                  <div className="border-b border-slate-100 pb-3">
+                    <h3 className="font-extrabold text-sm text-slate-800 flex items-center gap-2">
+                      <CloudUpload className="w-4 h-4 text-blue-600" />
+                      ตั้งค่าการนำเข้าข้อมูล (Import Settings)
+                    </h3>
+                  </div>
+
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1.5">
+                        ลิงก์ Google Sheets (Spreadsheet URL)
+                      </label>
+                      <input 
+                        type="text"
+                        value={importSheetUrl}
+                        onChange={(e) => setImportSheetUrl(e.target.value)}
+                        placeholder="https://docs.google.com/spreadsheets/d/..."
+                        className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700 focus:outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500"
+                      />
+                      <p className="text-[10px] text-slate-400 mt-1 font-medium">
+                        * ตรวจสอบให้แน่ใจว่าลิงก์ถูกแชร์แบบ "ทุกคนที่มีลิงก์มีสิทธิ์อ่าน" (Anyone with link can view)
+                      </p>
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1.5">
+                        ชื่อแผ่นงาน / ชีท (จะถูกใช้เป็นชื่อ Collection ใน Firestore)
+                      </label>
+                      <input 
+                        type="text"
+                        value={importSheetName}
+                        onChange={(e) => setImportSheetName(e.target.value)}
+                        placeholder="เช่น CRM, Tasks หรือชีทอื่นๆ"
+                        className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500"
+                      />
+                    </div>
+
+                    {/* Shortcuts / Quick presets */}
+                    <div>
+                      <span className="block text-[10px] font-bold uppercase text-slate-400 mb-1.5">ชีทแนะนำทางด่วน:</span>
+                      <div className="flex gap-2">
+                        <button 
+                          type="button"
+                          onClick={() => setImportSheetName('CRM')}
+                          className={`px-3 py-1.5 rounded-lg text-[11px] font-bold transition-all ${
+                            importSheetName === 'CRM' 
+                              ? 'bg-blue-600 text-white shadow-sm' 
+                              : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+                          }`}
+                        >
+                          CRM (ทะเบียนเกษตรกร)
+                        </button>
+                        <button 
+                          type="button"
+                          onClick={() => setImportSheetName('Tasks')}
+                          className={`px-3 py-1.5 rounded-lg text-[11px] font-bold transition-all ${
+                            importSheetName === 'Tasks' 
+                              ? 'bg-blue-600 text-white shadow-sm' 
+                              : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+                          }`}
+                        >
+                          Tasks (คำขอ/งาน)
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="pt-4 border-t border-slate-100">
+                      <button 
+                        type="button"
+                        disabled={isImporting}
+                        onClick={handleImportSheet}
+                        className="w-full py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white font-extrabold rounded-2xl text-xs transition shadow-md shadow-blue-500/10 flex items-center justify-center gap-2 cursor-pointer"
+                      >
+                        {isImporting ? (
+                          <>
+                            <RefreshCw className="w-4 h-4 animate-spin" />
+                            กำลังประมวลผลแปลงข้อมูลคลาวด์...
+                          </>
+                        ) : (
+                          <>
+                            <CloudUpload className="w-4 h-4" />
+                            แปลง Sheet และบันทึกไปยัง Firestore
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                </div>
+
+                {/* Rules & Info display panel */}
+                <div className="lg:col-span-7 space-y-6">
+                  
+                  {/* Security Rules code block */}
+                  <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-md text-white">
+                    <div className="flex justify-between items-center border-b border-slate-800 pb-3 mb-4">
+                      <h3 className="font-extrabold text-sm flex items-center gap-2 text-blue-400">
+                        <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                        ความปลอดภัยและกฎการเข้าถึงคลาวด์ (Firestore Security Rules)
+                      </h3>
+                      <span className="bg-emerald-500/15 text-emerald-400 text-[9px] font-black uppercase px-2 py-0.5 rounded border border-emerald-500/20">
+                        ผ่านการตรวจสอบ
+                      </span>
+                    </div>
+
+                    <p className="text-[11px] text-slate-300 mb-3 leading-relaxed font-medium">
+                      นี่คือกฎสิทธิ์การเข้าถึงข้อมูล (Security Rules) ของฐานข้อมูล Firestore ในโครงการของคุณ 
+                      คุณสามารถคัดลอกไฟล์กฎนี้ไปปรับปรุงในเมนู Rules บนหน้าคอนโซลของ Firebase ได้โดยตรง:
+                    </p>
+
+                    <div className="bg-slate-950 rounded-xl p-4 font-mono text-[10px] text-emerald-400/90 leading-normal overflow-x-auto border border-slate-800 shadow-inner">
+                      <p>rules_version = '2';</p>
+                      <p>service cloud.firestore &#123;</p>
+                      <p className="pl-4">match /databases/&#123;database&#125;/documents &#123;</p>
+                      <p className="pl-8 text-slate-500">// Rules for dynamic collections imported from Google Sheets (e.g. CRM, Tasks)</p>
+                      <p className="pl-8">match /&#123;collectionName&#125;/&#123;documentId&#125; &#123;</p>
+                      <p className="pl-12 text-blue-400">allow read, write: if true;</p>
+                      <p className="pl-8">&#125;</p>
+                      <p className="pl-4">&#125;</p>
+                      <p>&#125;</p>
+                    </div>
+                    
+                    <p className="text-[10px] text-amber-400 font-semibold mt-3 flex items-center gap-1.5">
+                      <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                      คำแนะนำ: ในการใช้งานระดับโปรดักชันจริง สามารถเปลี่ยนสิทธิ์ "if true" เป็น "if request.auth != null" เพื่อความปลอดภัยสูงสุดได้
+                    </p>
+                  </div>
+
+                  {/* Dynamic Migration Result Logs */}
+                  {importResult && (
+                    <div className={`rounded-3xl p-6 border shadow-sm animate-fade-in ${
+                      importResult.success 
+                        ? 'bg-emerald-50/50 border-emerald-200 text-emerald-950' 
+                        : 'bg-rose-50/50 border-rose-200 text-rose-950'
+                    }`}>
+                      <div className="flex items-center gap-2 mb-3">
+                        {importResult.success ? (
+                          <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+                        ) : (
+                          <XCircle className="w-5 h-5 text-rose-600 shrink-0" />
+                        )}
+                        <h4 className="font-extrabold text-sm">
+                          {importResult.success ? 'สถานะ: การแปลงข้อมูลคลาวด์สำเร็จ!' : 'สถานะ: เกิดข้อผิดพลาดในการประมวลผล'}
+                        </h4>
+                      </div>
+
+                      <p className="text-xs font-semibold leading-relaxed mb-4">
+                        {importResult.message}
+                      </p>
+
+                      {importResult.success && importResult.preview && importResult.preview.length > 0 && (
+                        <div className="space-y-2">
+                          <span className="block text-[10px] font-bold uppercase text-slate-500">
+                            ตัวอย่างข้อมูลแถวแรกๆ ที่แปลงลง Firestore (Preview Top 5 Records):
+                          </span>
+                          <div className="bg-slate-900 rounded-xl p-4 font-mono text-[9px] text-slate-300 leading-normal max-h-48 overflow-y-auto border border-slate-800 shadow-inner">
+                            <pre>{JSON.stringify(importResult.preview, null, 2)}</pre>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                 </div>
 
               </div>
