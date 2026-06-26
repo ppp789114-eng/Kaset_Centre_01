@@ -1133,22 +1133,6 @@ export default function App() {
             </nav>
           </div>
 
-          <div>
-            <p className="text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-2 px-3">ระบบคลาวด์และฐานข้อมูล</p>
-            <nav className="space-y-1">
-              <button 
-                onClick={() => { navigateToView('import'); }} 
-                className={`w-full flex items-center justify-between px-3 py-2.5 text-xs rounded-xl transition-all ${
-                  currentView === 'import' ? 'bg-blue-600 text-white font-bold shadow-md shadow-blue-600/10' : 'hover:bg-slate-900 hover:text-white'
-                }`}
-              >
-                <div className="flex items-center gap-2.5">
-                  <CloudUpload className="w-4 h-4 shrink-0 text-blue-400" />
-                  <span>แปลง Sheet ไป Firestore (/import)</span>
-                </div>
-              </button>
-            </nav>
-          </div>
         </div>
 
         {/* Sidebar Footer / Staff Info */}
